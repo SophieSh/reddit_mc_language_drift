@@ -1,0 +1,34 @@
+seed: 42
+run_id: "dev"
+
+paths:
+  raw: data/raw
+  interim: data/interim
+  processed: data/processed
+  features: data/features
+  models: models
+  reports: reports
+
+reddit:
+  min_chars: 100
+  lang: "en"
+
+features:
+  sentiment: "vader"   
+
+drift:
+  cycle_days_range: [24, 35]
+
+patterns:
+  moon1:
+    pattern_1: "(started|got) my period (yesterday|today|a couple of days ago|last night|this morning|this evening)"
+  moon2:
+    pattern_2: "just got my period"
+    pattern_3: "my period on (January|February|March|April|May|June|July|August|September|October|November|December)"
+    pattern_4: "started menstruating (today|yesterday)"
+    pattern_5: "(i am|i'm) on day \\d+ of my period"
+    pattern_6: "my period started (yesterday|today|a couple of days ago|last night|this morning|this evening)"
+  moon3:
+    pattern_7: "(?:DPO\\s*:?[\\s-]*(\\d{1,2})|(\\d{1,2})\\s*:?[\\s-]*DPO)"
+    pattern_8: "lmp was(?: on)?"
+    pattern_9: "i'm on cd"

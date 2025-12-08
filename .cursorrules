@@ -1,0 +1,68 @@
+# Context
+This repo analyzes Reddit posts written by women about their menstrual cycles
+to detect cyclical language drift (~24–35 days). 
+We use posts where users explicitly mention period start or related cycle events
+(e.g., "I got my period today", "I'm on day 3", "8 DPO", etc.) to anchor time.
+The goal is to quantify measurable linguistic changes aligned with menstrual cycles,
+using features such as sentiment and lexical statistics over time.
+
+
+
+Code must be reproducible, deterministic (seeded), and write artifacts to staged folders.
+
+# Tech & Style
+- Python 3.10+, pandas, numpy, pyarrow, scipy, scikit-learn, matplotlib (no seaborn).
+- Business logic lives in src/ (a few focused modules). scripts/ are thin CLIs that call functions from src/.
+- Load paths/params from YAML (configs/), src/config.py avoid hardcoded file paths.
+- Prefer small, readable functions over complex class hierarchies.
+- **Think deeply about data edge cases**: encoding issues (UTF-8 BOM for Excel), Reddit-specific text formatting, file formats that lie about their extension, etc.
+- **Anticipate environment issues**: multiple Python installs, package imports, path handling on Windows.
+
+# Data Contracts
+- Raw inputs are the moon/moon2/moon3 files described in docs/data/schema_posts.md.
+- Preprocessing should normalize them into a single “processed posts” table with:
+  user_id, post_id, ts_utc, subreddit, text, source_cut (see docs/data/schema_posts.md).
+- Never mutate data/raw; write to data/interim → data/processed → data/features.
+- Feature tables must include: user_id, post_id, ts_utc, and feature_* columns.
+
+# Testing (later, i will tell when)
+For data-related code, focus on small, high-impact tests:
+- Schema tests: check that input/output tables have expected columns and dtypes.
+- Sanity checks: e.g., timestamps in a valid range, not all authors are "[deleted]".
+- Transformation tests: given a tiny toy dataframe, clean/feature functions produce the expected rows/columns.
+- Drift tests (later): given a synthetic distribution + a perturbed version, the drift metric should increase.
+
+Keep tests small and targeted; avoid over-engineering or huge synthetic datasets.
+
+# Workflow Pattern
+When I ask for a new step or change:
+1) **Think through edge cases and domain-specific details first** (e.g., Reddit posts have messy formatting, data may have encoding issues, file extensions may be misleading)
+2) **Be creative and propose improvements** - if you see a better approach or spot related issues, suggest them (but keep it focused)
+3) **Implement directly** - add functions to existing src/ modules, update scripts, write code
+4) **Explain what you did and why** after implementation, highlighting key decisions
+5) If tests are relevant (when I tell you), update them
+6) For config changes or new patterns, add them to configs/base.yaml directly
+
+# File & Docs Creation Policy
+- **Prefer updating existing files** over creating new ones
+- **For obviously needed files** (like `__init__.py` for packages, utility modules that don't exist yet):
+  - Create them directly
+  - Mention what you created at the end
+- **For less obvious files** (new docs, major new modules):
+  - Explain why needed and implement
+  - I'll tell you if I disagree
+- Never create boilerplate docs (README sections I didn't ask for, generic .md files)
+
+# Guardrails
+- No secrets in code or logs (.env + configs only for anything sensitive).
+- Randomness must be controlled via a seed in the config.
+- Avoid unnecessary boilerplate, frameworks, or over-architecting; keep the project lean and understandable.
+- Use Anaconda Python when running scripts (C:\users\sophie\anaconda3\python.exe).
+- Save CSVs with UTF-8-BOM encoding for Excel compatibility.
+- Raw data files may be Excel files misnamed as .csv - check format before reading.
+
+# References
+@README.md
+@configs/base.yaml
+@docs/drift_pipeline.md
+@docs/data/schema_posts.md
