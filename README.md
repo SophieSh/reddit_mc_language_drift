@@ -1,3 +1,7 @@
+# reddit_mc_language_drift
+
+Reddit post analysis: detecting cyclical language changes aligned with menstrual cycles
+
 ## Project Overview
 
 This project explores **language drift across the menstrual cycle** using Reddit data.
