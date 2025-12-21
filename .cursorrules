@@ -9,6 +9,11 @@ using features such as sentiment and lexical statistics over time.
 
 
 Code must be reproducible, deterministic (seeded), and write artifacts to staged folders.
+WRITE CODE IN REUSABLE MODULES(FUNCTIONS) LIKE LEGO.
+- Extract business logic to src/ as small, focused functions
+- scripts/ should import from src/ and be thin CLIs (argparse + function calls)
+- Avoid duplicating logic across scripts - if you see similar code, extract to src/
+VERY TIME I ASK TO CHANGE CODE, FIRST EXPLAIN WHY IT IN THE FIRST PLACE WAS WRITTEN AS IT WAS, AND THEN WHY AND HOW AND IF WE SHOULD CHANGE IT
 
 # Tech & Style
 - Python 3.10+, pandas, numpy, pyarrow, scipy, scikit-learn, matplotlib (no seaborn).
@@ -42,6 +47,24 @@ When I ask for a new step or change:
 4) **Explain what you did and why** after implementation, highlighting key decisions
 5) If tests are relevant (when I tell you), update them
 6) For config changes or new patterns, add them to configs/base.yaml directly
+
+# Code Organization & Cleanup (CRITICAL - Prevents Mess Accumulation)
+**Before writing any new code:**
+1. **Check for existing similar code** - Search scripts/ and src/ for similar functionality. Reuse or refactor existing code rather than duplicating.
+2. **Identify reusable logic** - If a script has business logic (not just CLI), extract functions to src/ immediately. scripts/ should be thin wrappers.
+3. **No versioned scripts** - NEVER create `script_v2.py`, `script_clean.py`, `script_new.py`. If improving existing script:
+   - Update the original script in place, OR
+   - Delete old version and create new one with same name, OR
+   - Ask user which approach they prefer
+4. **Clean up when replacing** - If creating improved version of existing script, propose deleting the old one (unless user explicitly wants to keep both).
+5. **Modular from the start** - Even for exploratory code, if it's going in scripts/ or src/, write reusable functions. Only analysis/ can be messy/throwaway.
+6. **One script, one purpose** - If a script does multiple things, split into focused scripts or extract shared logic to src/.
+7. **When refactoring** - Before moving code, explain what exists, why it was written that way, and how/why the refactor improves it.
+
+**Directory structure:**
+- `analysis/` = exploratory/throwaway code (messy is OK here)
+- `scripts/` = production-ready CLIs (must be clean, modular, use src/)
+- `src/` = reusable business logic (must be modular, well-organized)
 
 # File & Docs Creation Policy
 - **Prefer updating existing files** over creating new ones
