@@ -35,13 +35,14 @@ def main(cfg_path: str, test_sample: int | None = None):
     interim_dir.mkdir(parents=True, exist_ok=True)
     
     moon3_patterns = cfg["patterns"]["moon3"]
+    moon3_anchors = cfg["paths"]["files"]["moon3_anchors"]
     
     # Create filtered file if it doesn't exist
     filtered_path = interim_dir / "moon3_filtered.csv"
     if not filtered_path.exists():
         print("Filtered file not found. Creating it from raw data...")
-        print("Loading moon3.csv...")
-        df = pd.read_csv(raw_dir / "moon3.csv", encoding='latin-1')
+        print(f"Loading {moon3_anchors}...")
+        df = pd.read_csv(raw_dir / moon3_anchors, encoding='latin-1')
         print(f"Loaded {len(df)} posts")
         
         df = filter_deleted_authors(df)
@@ -118,7 +119,7 @@ def main(cfg_path: str, test_sample: int | None = None):
     else:
         sample_path = None
 
-    print(f"\nProcessed {len(df)} posts from moon3.csv (after filtering)")
+    print(f"\nProcessed {len(df)} posts from {moon3_anchors} (after filtering)")
     print(f"Found {len(phrase_summary)} unique matched phrases")
     print(f"Total uncertain posts: {total_uncertain} ({100*total_uncertain/len(df):.1f}%)")
     print(f"\nTop 10 phrases by count:")

@@ -23,8 +23,9 @@ def main(cfg_path: str):
     interim_dir.mkdir(parents=True, exist_ok=True)
     
     moon2_patterns = cfg["patterns"]["moon2"]
+    moon2_anchors = cfg["paths"]["files"]["moon2_anchors"]
     
-    df = pd.read_excel(raw_dir / "moon2.xlsx")
+    df = pd.read_excel(raw_dir / moon2_anchors)
     df = filter_deleted_authors(df)
     df = add_timestamp_columns(df)
     df = fix_removed_posts_selftext(df)
@@ -76,7 +77,7 @@ def main(cfg_path: str):
     else:
         sample_path = None
 
-    print(f"Processed {len(df)} posts from moon2.xlsx")
+    print(f"Processed {len(df)} posts from {moon2_anchors}")
     print(f"Found {len(phrase_summary)} unique matched phrases")
     print(f"Total uncertain posts: {total_uncertain} ({100*total_uncertain/len(df):.1f}%)")
     print(f"\nTop 10 phrases by count:")
