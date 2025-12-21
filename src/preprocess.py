@@ -1,5 +1,4 @@
 import re
-import html
 import pandas as pd
 from pathlib import Path
 from datetime import datetime
@@ -14,12 +13,65 @@ def filter_deleted_authors(df: pd.DataFrame) -> pd.DataFrame:
     return df[df['author'] != '[deleted]'].copy()
 
 
+def concatenate_title_selftext_text(title: str | None, selftext: str | None) -> str:
+    """Concatenate title and selftext into single text string.
+    
+    Args:
+        title: Post title (can be None)
+        selftext: Post selftext (can be None)
+    
+    Returns:
+        Concatenated text string
+    """
+    title = title if title is not None else ""
+    selftext = selftext if selftext is not None else ""
+    return (title + " " + selftext).strip()
+
+
 def concatenate_title_selftext(df: pd.DataFrame) -> pd.DataFrame:
-    """Concatenate title and selftext into text column."""
+    """Concatenate title and selftext into text column (vectorized for performance)."""
     df = df.copy()
-    df['text'] = df['title'].fillna('') + ' ' + df['selftext'].fillna('')
-    df['text'] = df['text'].apply(html.unescape).str.strip()
+    df['text'] = (df['title'].fillna('') + ' ' + df['selftext'].fillna('')).str.strip()
     return df
+
+
+def filter_posts_by_anchor_window(
+    posts_df: pd.DataFrame,
+    users_df: pd.DataFrame,
+    window_months: int = 12,
+    user_col: str = "author",
+    timestamp_col: str = "ts_utc"
+) -> pd.DataFrame:
+    """Filter posts to only those within ±N months of anchor timestamp.
+    
+    Reduces noise by keeping only posts within a time window around when
+    the user explicitly mentioned their period (anchor post).
+    
+    Args:
+        posts_df: DataFrame with posts (must have user_col and timestamp_col)
+        users_df: DataFrame with user anchors (must have 'user' and 'timestep')
+        window_months: Number of months before/after anchor to keep (default 12)
+        user_col: Column name for user ID in posts_df
+        timestamp_col: Column name for timestamp in posts_df (datetime-like)
+    
+    Returns:
+        Filtered DataFrame with only posts within window
+    """
+    anchor_map = users_df.set_index('user')['timestep']
+    
+    posts_df = posts_df.copy()
+    posts_df['_anchor_ts'] = posts_df[user_col].map(anchor_map)
+    
+    posts_df['_days_from_anchor'] = (
+        pd.to_datetime(posts_df[timestamp_col]) - 
+        pd.to_datetime(posts_df['_anchor_ts'])
+    ).dt.days.abs()
+    
+    max_days = int(window_months * 30.44)
+    filtered_df = posts_df[posts_df['_days_from_anchor'] <= max_days].copy()
+    filtered_df = filtered_df.drop(columns=['_anchor_ts', '_days_from_anchor'])
+    
+    return filtered_df
 
 def fix_removed_posts_selftext(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -497,6 +549,92 @@ def calculate_offset_by_pattern_type(
 
 
 # /////////////////////////////////////////////////////////////////////////////
+# OFFSET FOR ARBITRARY POSTS RELATIVE TO CYCLE DAY 1
+# /////////////////////////////////////////////////////////////////////////////
+
+def calculate_post_offset_from_cd1(
+    post_timestamp: pd.Timestamp | None,
+    anchor_timestamp: pd.Timestamp | None,
+    anchor_offset_from_cd1: int | float | None,
+) -> int | None:
+    """Calculate signed offset from cycle day 1 for a post.
+
+    The anchor post already has an ``offset_from_cd1`` (e.g., 0 for CD1, 2 for CD3).
+    For any other post from the same user, we take the day difference between the
+    post timestamp and the anchor timestamp and add it to the anchor offset.
+
+    Examples:
+        - Anchor offset = 0 (CD1), post is 3 days later      → offset = +3
+        - Anchor offset = 2 (CD3), post is 1 day earlier     → offset = 1
+        - Anchor offset = 10,    post is 5 days earlier      → offset = 5
+
+    The result can be positive or negative, depending on whether the post is after
+    or before cycle day 1.
+    """
+    if (
+        post_timestamp is None
+        or anchor_timestamp is None
+        or anchor_offset_from_cd1 is None
+        or pd.isna(post_timestamp)
+        or pd.isna(anchor_timestamp)
+        or pd.isna(anchor_offset_from_cd1)
+    ):
+        return None
+
+    # Ensure we are working with pandas Timestamps
+    post_ts = pd.to_datetime(post_timestamp)
+    anchor_ts = pd.to_datetime(anchor_timestamp)
+
+    # Integer day difference between post and anchor (can be negative).
+    # Use calendar days (normalize to midnight) to avoid time-of-day artifacts.
+    days_diff_rounded = (post_ts.normalize() - anchor_ts.normalize()).days
+
+    try:
+        anchor_offset_int = int(anchor_offset_from_cd1)
+    except (TypeError, ValueError):
+        return None
+
+    return anchor_offset_int + days_diff_rounded
+
+
+def add_offsets_from_anchors(
+    df: pd.DataFrame,
+    anchors: dict[str, tuple[pd.Timestamp, int]],
+    author_col: str = "author",
+    timestamp_col: str = "ts_utc",
+) -> pd.DataFrame:
+    """Add offset_from_cd1 column to DataFrame using anchor information.
+    
+    Args:
+        df: DataFrame with author and timestamp columns
+        anchors: Dictionary mapping user to (anchor_timestamp, anchor_offset_from_cd1)
+        author_col: Name of author column (default: "author")
+        timestamp_col: Name of timestamp column (default: "ts_utc")
+    
+    Returns:
+        DataFrame with added offset_from_cd1 column
+    """
+    df = df.copy()
+    
+    def compute_offset(row: pd.Series) -> int | None:
+        user = str(row[author_col])
+        if user not in anchors:
+            return None
+        
+        anchor_ts, anchor_offset = anchors[user]
+        post_ts = row[timestamp_col]
+        
+        return calculate_post_offset_from_cd1(
+            post_timestamp=post_ts,
+            anchor_timestamp=anchor_ts,
+            anchor_offset_from_cd1=anchor_offset,
+        )
+    
+    df["offset_from_cd1"] = df.apply(compute_offset, axis=1)
+    return df
+
+
+# /////////////////////////////////////////////////////////////////////////////
 # DATAFRAME COLUMN ADDITIONS
 # /////////////////////////////////////////////////////////////////////////////
 
@@ -658,14 +796,19 @@ def add_timestamp_columns(
     df: pd.DataFrame,
     utc_col: str = "created_utc",
     tz: str = "UTC",
+    add_date_string: bool = False,
 ) -> pd.DataFrame:
     """Convert unix timestamp to datetime with timezone and formatted string."""
     df = df.copy()
     if utc_col not in df.columns:
         raise KeyError(f"{utc_col} column missing")
 
-    df["ts_utc"] = pd.to_datetime(df[utc_col], unit="s", utc=True).dt.tz_convert(tz)
-    df["ts_date"] = df["ts_utc"].dt.strftime("%Y-%m-%d")
+    ts_numeric = pd.to_numeric(df[utc_col], errors="coerce")
+    df["ts_utc"] = pd.to_datetime(ts_numeric, unit="s", utc=True).dt.tz_convert(tz)
+    
+    if add_date_string:
+        df["ts_date"] = df["ts_utc"].dt.strftime("%Y-%m-%d")
+    
     return df
 
 
@@ -727,7 +870,17 @@ def sample_posts_by_phrase(
     sample_size: int = 30,
     random_state: int | None = None,
 ) -> pd.DataFrame:
-    """Return up to sample_size random rows per phrase (uniform sampling)."""
+    """Return up to sample_size random rows per phrase (uniform sampling).
+    
+    Args:
+        df: DataFrame to sample from
+        phrase_col: Column to group by for sampling
+        sample_size: Number of rows to sample per phrase
+        random_state: Random seed (should be passed from config for reproducibility)
+    
+    Returns:
+        DataFrame with sampled rows
+    """
     if phrase_col not in df.columns:
         raise KeyError(f"{phrase_col} column missing")
 
