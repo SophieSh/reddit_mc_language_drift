@@ -1,0 +1,26 @@
+# Run configuration for all CD patterns (1, 2, 3, 4, 5, 6, 9)
+# Usage: python scripts/07_full_pipeline_pattern1_clean.py --config configs/base.yaml --run-config configs/runs/all_cd_patterns.yaml
+
+pattern_type: cd
+patterns: ["pattern_1", "pattern_2", "pattern_3", "pattern_4", "pattern_5", "pattern_6", "pattern_9"]
+
+# Pipeline parameters
+window_months: 6
+min_chars: 150
+use_checkpoints: true
+posts_only: false
+
+# Analysis parameters
+analysis_methods:
+  - lomb_scargle          # Astropy Lomb-Scargle with FAP (10-90 day search)
+  - fft_interpolation     # FFT with linear interpolation (24-35 day search)
+  - fft_zeropad           # FFT with zero-padding (24-35 day search)
+  - fft_interpolation_wide  # FFT interpolation (10-50 day search, filtered to 24-35)
+  - fft_zeropad_wide        # FFT zero-pad (10-50 day search, filtered to 24-35)
+
+normalization: zscore     # "zscore", "minmax", or "none" (per-user normalization)
+snr_threshold: 3.0
+
+# Output
+output_subdir: "all_cd_patterns_run"
+

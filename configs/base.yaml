@@ -8,16 +8,69 @@ paths:
   features: data/features
   models: models
   reports: reports
+  
+  files:
+    # Anchor files (Excel/CSV with pattern matches - used in preprocessing)
+    moon1_anchors: moon1.xlsx
+    moon2_anchors: moon2.xlsx
+    moon3_anchors: moon3.csv
+    
+    # Posts files (TSV with all posts from users - for timeline building)
+    moon1_posts: moon1_all_post_2015_2025.filtered.tsv
+    moon2_posts: moon2_all_posts_2010_2025.tsv
+    moon3_posts: moon3_all_posts_2010_2025.tsv  # TODO: Add this file when available 
+    
+    # Comments file (shared across all patterns)
+    comments_all: moon_all_comments_2009_2025.tsv
+    
+    # User databases (in processed/ directory, stable processed data)
+    users_db_cd: users_database_CD_*.csv
+    users_db_dpo: users_database_DPO_*.csv
 
 reddit:
   min_chars: 100
   lang: "en"
 
 features:
-  sentiment: "vader"   
+  sentiment: "vader"
+
+analysis:
+  # Default methods (can be overridden in run configs)
+  methods:
+    - lomb_scargle          # Astropy Lomb-Scargle with FAP (10-90 day search)
+    - fft_interpolation     # FFT with linear interpolation (24-35 day search)
+    - fft_zeropad           # FFT with zero-padding (24-35 day search)
+  
+  # Default normalization (can be overridden in run configs)
+  normalization: zscore     # "zscore", "minmax", or "none" (per-user normalization)
+  
+  # Default thresholds for filtering results (can be overridden in run configs)
+  snr_threshold: 3.0      # Signal-to-noise ratio threshold
+  fap_threshold: 0.1      # False Alarm Probability threshold (for Lomb-Scargle)
+  min_cycles: 1.5         # Minimum number of cycles required
+  
+  # Interpolation method for FFT (when converting irregular to regular grid)
+  interpolation: linear  # "linear", "cubic", "quadratic" (future: support scipy methods)
 
 drift:
   cycle_days_range: [24, 35]
+
+# Pattern source mapping (which moon file each pattern comes from)
+pattern_sources:
+  pattern_1: moon1
+  pattern_2: moon2
+  pattern_3: moon2
+  pattern_4: moon2
+  pattern_5: moon2
+  pattern_6: moon2
+  pattern_7: moon3
+  pattern_8: moon3
+  pattern_9: moon3
+
+# Pattern type grouping
+pattern_types:
+  cd: ["pattern_1", "pattern_2", "pattern_3", "pattern_4", "pattern_5", "pattern_6", "pattern_9"]
+  dpo: ["pattern_7"]
 
 patterns:
   moon1:

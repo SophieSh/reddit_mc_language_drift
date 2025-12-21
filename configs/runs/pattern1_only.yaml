@@ -1,0 +1,24 @@
+# Run configuration for pattern_1 only
+# Usage: python scripts/07_full_pipeline_pattern1_clean.py --config configs/base.yaml --run-config configs/runs/pattern1_only.yaml
+
+pattern_type: cd
+patterns: ["pattern_1"]
+
+# Pipeline parameters
+window_months: 6
+min_chars: 150
+use_checkpoints: true
+posts_only: true
+
+# Analysis parameters
+analysis_methods:
+  - lomb_scargle          # Astropy Lomb-Scargle with FAP (10-90 day search)
+  - fft_interpolation     # FFT with linear interpolation (24-35 day search)
+  - fft_zeropad           # FFT with zero-padding (24-35 day search)
+
+normalization: zscore     # "zscore", "minmax", or "none" (per-user normalization)
+snr_threshold: 3.0
+
+# Output
+output_subdir: "pattern1_run"
+
