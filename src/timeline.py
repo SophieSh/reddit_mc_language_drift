@@ -353,23 +353,28 @@ def load_users_database(
     return df
 
 
-def build_anchor_dict(users_df: pd.DataFrame) -> dict[str, tuple[pd.Timestamp, int]]:
+def build_anchor_dict(users_df: pd.DataFrame, pattern_type: str = "cd") -> dict[str, tuple[pd.Timestamp, int]]:
     """Build anchor lookup dictionary from users database.
     
     Args:
-        users_df: Users database DataFrame with columns: user, timestep, offset_from_cd1
+        users_df: Users database DataFrame with columns: user, timestep, offset_from_cd1 or dpo_days
+        pattern_type: "cd" for cycle day patterns, "dpo" for DPO patterns (default: "cd")
     
     Returns:
-        Dictionary mapping user -> (anchor_timestamp, anchor_offset_from_cd1)
+        Dictionary mapping user -> (anchor_timestamp, anchor_value)
+        For CD patterns: anchor_value is offset_from_cd1
+        For DPO patterns: anchor_value is dpo_days
     """
     anchors = {}
+    value_col = "dpo_days" if pattern_type == "dpo" else "offset_from_cd1"
+    
     for _, row in users_df.iterrows():
         user = str(row["user"])
         anchor_ts = pd.to_datetime(row["timestep"])
-        anchor_offset = int(row["offset_from_cd1"])
-        anchors[user] = (anchor_ts, anchor_offset)
+        anchor_value = int(row[value_col])
+        anchors[user] = (anchor_ts, anchor_value)
     
-    print(f"Built anchor dictionary for {len(anchors)} users")
+    print(f"Built anchor dictionary for {len(anchors)} users (pattern_type={pattern_type})")
     return anchors
 
 

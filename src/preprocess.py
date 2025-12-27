@@ -552,32 +552,44 @@ def calculate_offset_by_pattern_type(
 # OFFSET FOR ARBITRARY POSTS RELATIVE TO CYCLE DAY 1
 # /////////////////////////////////////////////////////////////////////////////
 
-def calculate_post_offset_from_cd1(
+def calculate_post_offset_from_anchor(
     post_timestamp: pd.Timestamp | None,
     anchor_timestamp: pd.Timestamp | None,
-    anchor_offset_from_cd1: int | float | None,
+    anchor_value: int | float | None,
 ) -> int | None:
-    """Calculate signed offset from cycle day 1 for a post.
-
-    The anchor post already has an ``offset_from_cd1`` (e.g., 0 for CD1, 2 for CD3).
-    For any other post from the same user, we take the day difference between the
-    post timestamp and the anchor timestamp and add it to the anchor offset.
-
+    """Calculate time offset for a post relative to anchor.
+    
+    Generic function that calculates offset by taking the anchor value and adding
+    the day difference between post and anchor timestamps.
+    
+    Works for both:
+    - CD patterns: anchor_value is offset_from_cd1 (e.g., 0 for CD1, 2 for CD3)
+    - DPO patterns: anchor_value is dpo_days (e.g., 8 for "8 DPO")
+    
     Examples:
-        - Anchor offset = 0 (CD1), post is 3 days later      → offset = +3
-        - Anchor offset = 2 (CD3), post is 1 day earlier     → offset = 1
-        - Anchor offset = 10,    post is 5 days earlier      → offset = 5
-
+        - Anchor = 0 (CD1), post is 3 days later      → offset = +3
+        - Anchor = 8 (DPO 8), post is 3 days later    → DPO = 11
+        - Anchor = 2 (CD3), post is 1 day earlier     → offset = 1
+        - Anchor = 8 (DPO 8), post is 2 days earlier  → DPO = 6
+    
     The result can be positive or negative, depending on whether the post is after
-    or before cycle day 1.
+    or before the anchor reference point.
+    
+    Args:
+        post_timestamp: Post timestamp
+        anchor_timestamp: Anchor post timestamp
+        anchor_value: Anchor value (offset_from_cd1 or dpo_days)
+    
+    Returns:
+        Calculated offset value or None if inputs are invalid
     """
     if (
         post_timestamp is None
         or anchor_timestamp is None
-        or anchor_offset_from_cd1 is None
+        or anchor_value is None
         or pd.isna(post_timestamp)
         or pd.isna(anchor_timestamp)
-        or pd.isna(anchor_offset_from_cd1)
+        or pd.isna(anchor_value)
     ):
         return None
 
@@ -590,11 +602,11 @@ def calculate_post_offset_from_cd1(
     days_diff_rounded = (post_ts.normalize() - anchor_ts.normalize()).days
 
     try:
-        anchor_offset_int = int(anchor_offset_from_cd1)
+        anchor_value_int = int(anchor_value)
     except (TypeError, ValueError):
         return None
 
-    return anchor_offset_int + days_diff_rounded
+    return anchor_value_int + days_diff_rounded
 
 
 def add_offsets_from_anchors(
@@ -602,35 +614,38 @@ def add_offsets_from_anchors(
     anchors: dict[str, tuple[pd.Timestamp, int]],
     author_col: str = "author",
     timestamp_col: str = "ts_utc",
+    pattern_type: str = "cd",
 ) -> pd.DataFrame:
-    """Add offset_from_cd1 column to DataFrame using anchor information.
+    """Add offset column (offset_from_cd1 OR dpo_days) using anchor information.
     
     Args:
         df: DataFrame with author and timestamp columns
-        anchors: Dictionary mapping user to (anchor_timestamp, anchor_offset_from_cd1)
+        anchors: Dictionary mapping user to (anchor_timestamp, anchor_value)
         author_col: Name of author column (default: "author")
         timestamp_col: Name of timestamp column (default: "ts_utc")
+        pattern_type: "cd" for cycle day patterns, "dpo" for DPO patterns (default: "cd")
     
     Returns:
-        DataFrame with added offset_from_cd1 column
+        DataFrame with added offset_from_cd1 column (CD) or dpo_days column (DPO)
     """
     df = df.copy()
+    column_name = "dpo_days" if pattern_type == "dpo" else "offset_from_cd1"
     
     def compute_offset(row: pd.Series) -> int | None:
         user = str(row[author_col])
         if user not in anchors:
             return None
         
-        anchor_ts, anchor_offset = anchors[user]
-        post_ts = row[timestamp_col]
+        anchor_ts, anchor_value = anchors[user]
         
-        return calculate_post_offset_from_cd1(
-            post_timestamp=post_ts,
+        return calculate_post_offset_from_anchor(
+            post_timestamp=row[timestamp_col],
             anchor_timestamp=anchor_ts,
-            anchor_offset_from_cd1=anchor_offset,
+            anchor_value=anchor_value,
         )
     
-    df["offset_from_cd1"] = df.apply(compute_offset, axis=1)
+    df[column_name] = df.apply(compute_offset, axis=1)
+    
     return df
 
 
@@ -763,8 +778,38 @@ def add_uncertainty_flag(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def extract_dpo_days_for_pattern7(
+    regex_type: str,
+    matched_phrase: str,
+    matched_sentence: str | None = None,
+) -> int | None:
+    """Extract DPO days for pattern7 (days past ovulation).
+    
+    For pattern7, extracts DPO directly from matched phrase.
+    For other patterns, returns None.
+    
+    Args:
+        regex_type: Pattern type (should be "pattern_7" for DPO)
+        matched_phrase: Matched phrase text
+        matched_sentence: Full sentence (not used for DPO extraction)
+    
+    Returns:
+        DPO value (0-14+) or None if not pattern7 or can't extract
+    """
+    if pd.isna(regex_type) or regex_type != "pattern_7":
+        return None
+    
+    if pd.isna(matched_phrase):
+        return None
+    
+    return extract_dpo_from_phrase(matched_phrase)
+
+
 def add_offset_from_cd1_by_pattern(df: pd.DataFrame, ovulation_day: int = 14) -> pd.DataFrame:
-    """Attach offset_from_cd1 column based on regex_type pattern."""
+    """Attach offset_from_cd1 column based on regex_type pattern.
+    
+    Also adds dpo_days column for pattern7 users.
+    """
     df = df.copy()
     df["offset_from_cd1"] = df.apply(
         lambda row: calculate_offset_by_pattern_type(
@@ -775,21 +820,19 @@ def add_offset_from_cd1_by_pattern(df: pd.DataFrame, ovulation_day: int = 14) ->
             ovulation_day
         ), axis=1
     )
-    return df
-
-
-def add_offset_from_cd1_moon3(df: pd.DataFrame, ovulation_day: int = 14) -> pd.DataFrame:
-    """Attach offset_from_cd1 column for moon3 patterns (DPO, LMP, CD)."""
-    df = df.copy()
-    df["offset_from_cd1"] = df.apply(
-        lambda row: calculate_offset_from_cd1_moon3(
-            row['matched_phrase'],
+    
+    # Add dpo_days column for pattern7
+    df["dpo_days"] = df.apply(
+        lambda row: extract_dpo_days_for_pattern7(
+            row.get('regex_type'),
+            row.get('matched_phrase'),
             row.get('matched_sentence', None),
-            row.get('ts_utc', None),
-            ovulation_day=ovulation_day
         ), axis=1
     )
+    
     return df
+
+
 
 
 def add_timestamp_columns(
