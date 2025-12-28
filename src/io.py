@@ -1,6 +1,7 @@
 """File I/O utilities for consistent file handling."""
 from __future__ import annotations
 
+import csv
 import json
 from datetime import datetime
 from pathlib import Path
@@ -30,14 +31,19 @@ def save_with_timestamp(
     prefix: str,
     suffix: str = ".csv",
     encoding: str = "utf-8-sig",
+    chunk_size: int = 1_000_000,
 ) -> Path:
     """Save DataFrame with timestamp in filename.
+    
+    For large DataFrames (>1M rows), writes in chunks to avoid memory issues.
     
     Args:
         df: DataFrame to save
         directory: Output directory
+        prefix: Filename prefix
         suffix: File extension (default: ".csv")
         encoding: File encoding (default: "utf-8-sig" for Excel compatibility)
+        chunk_size: Number of rows per chunk for large DataFrames (default: 1M)
     
     Returns:
         Path to saved file
@@ -46,7 +52,45 @@ def save_with_timestamp(
     timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
     filename = f"{prefix}_{timestamp}{suffix}"
     output_path = directory / filename
-    df.to_csv(output_path, index=False, encoding=encoding)
+    
+    # For large DataFrames, write in chunks to avoid memory issues
+    if len(df) > chunk_size:
+        print(f"  Writing {len(df):,} rows in chunks of {chunk_size:,}...")
+        n_chunks = (len(df) + chunk_size - 1) // chunk_size
+        
+        for i in range(n_chunks):
+            start_idx = i * chunk_size
+            end_idx = min((i + 1) * chunk_size, len(df))
+            chunk = df.iloc[start_idx:end_idx]
+            
+            # Write header only for first chunk
+            mode = 'w' if i == 0 else 'a'
+            header = (i == 0)
+            
+            chunk.to_csv(
+                output_path,
+                mode=mode,
+                header=header,
+                index=False,
+                encoding=encoding,
+                quoting=csv.QUOTE_NONNUMERIC,
+                escapechar='\\',
+            )
+            
+            if (i + 1) % 10 == 0 or (i + 1) == n_chunks:
+                print(f"    Progress: {end_idx:,}/{len(df):,} rows ({100*end_idx/len(df):.1f}%)")
+        
+        print(f"  ✓ Saved {len(df):,} rows to {output_path.name}")
+    else:
+        # For smaller DataFrames, write all at once
+        df.to_csv(
+            output_path, 
+            index=False, 
+            encoding=encoding,
+            quoting=csv.QUOTE_NONNUMERIC,
+            escapechar='\\',
+        )
+    
     return output_path
 
 

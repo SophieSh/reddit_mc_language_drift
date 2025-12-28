@@ -8,6 +8,14 @@ try:
 except ImportError:
     LexicalRichness = None
 
+try:
+    from tqdm.auto import tqdm
+except ImportError:
+    def tqdm(iterable, desc=None, total=None, **kwargs):
+        if desc:
+            print(desc)
+        return iterable
+
 
 def syntactic_complexity_batch(texts, nlp, batch_size=300, n_process=1):
     """Compute syntactic complexity for a batch of texts.
@@ -25,7 +33,10 @@ def syntactic_complexity_batch(texts, nlp, batch_size=300, n_process=1):
         return [0.0] * len(texts)
     
     results = []
-    for doc in nlp.pipe(texts, batch_size=batch_size, n_process=n_process):
+    for doc in tqdm(nlp.pipe(texts, batch_size=batch_size, n_process=n_process), 
+                    total=len(texts), 
+                    desc="   Processing syntactic complexity",
+                    unit="text"):
         sents = list(doc.sents)
         if len(sents) == 0:
             results.append(0.0)

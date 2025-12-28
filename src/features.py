@@ -60,7 +60,12 @@ def compute_textblob_sentiment(df: pd.DataFrame, text_column: str = 'text') -> p
         except:
             return {'polarity': 0.0, 'subjectivity': 0.0, 'intensity': 0.0}
     
-    sentiments = df[text_column].apply(get_sentiment)
+    try:
+        tqdm.pandas(desc="Processing TextBlob")
+        sentiments = df[text_column].progress_apply(get_sentiment)
+    except (AttributeError, ImportError):
+        sentiments = df[text_column].apply(get_sentiment)
+    
     df['textblob_polarity'] = sentiments.apply(lambda x: x['polarity'])
     df['textblob_subjectivity'] = sentiments.apply(lambda x: x['subjectivity'])
     df['textblob_intensity'] = sentiments.apply(lambda x: x['intensity'])
@@ -122,8 +127,226 @@ def compute_vader_sentiment(df: pd.DataFrame, text_column: str = 'text') -> pd.D
     return df
 
 
+def compute_syntactic_complexity(df: pd.DataFrame, text_column: str = 'text') -> pd.DataFrame:
+    """Compute syntactic complexity (slow spaCy operation).
+    
+    Args:
+        df: Input dataframe
+        text_column: Name of column containing text to analyze
+        
+    Returns:
+        DataFrame with added column:
+        - syntactic_complexity: subordinate clauses per sentence
+    """
+    print(f"Computing syntactic complexity on {len(df):,} texts...")
+    
+    try:
+        import spacy
+        nlp = spacy.load('en_core_web_md')
+        print("✓ spaCy loaded")
+        
+        df['syntactic_complexity'] = syntactic_complexity_batch(
+            df[text_column].fillna('').tolist(), nlp
+        )
+        print(f"✓ Syntactic complexity computed: mean = {df['syntactic_complexity'].mean():.3f}")
+    except Exception as e:
+        print(f"✗ spaCy error: {e}")
+        print("  Setting syntactic_complexity=0")
+        df['syntactic_complexity'] = 0.0
+    
+    return df
+
+
+def compute_cohesion(df: pd.DataFrame, text_column: str = 'text') -> pd.DataFrame:
+    """Compute cohesion (very slow spaCy operation).
+    
+    Args:
+        df: Input dataframe
+        text_column: Name of column containing text to analyze
+        
+    Returns:
+        DataFrame with added column:
+        - cohesion: semantic similarity (0-1)
+    """
+    print(f"Computing cohesion on {len(df):,} texts (this is VERY SLOW)...")
+    
+    try:
+        import spacy
+        nlp = spacy.load('en_core_web_md')
+        print("✓ spaCy loaded")
+        
+        cohesion_scores = []
+        for text in tqdm(df[text_column].fillna(''), 
+                        total=len(df), 
+                        desc="   Processing cohesion",
+                        unit="text"):
+            cohesion_scores.append(cohesion_score(text, nlp))
+        df['cohesion'] = cohesion_scores
+        df['cohesion'] = df['cohesion'].replace([None], np.nan)
+        print(f"✓ Cohesion computed: mean = {df['cohesion'].mean():.3f}")
+    except Exception as e:
+        print(f"✗ spaCy error: {e}")
+        print("  Setting cohesion=NaN")
+        df['cohesion'] = np.nan
+    
+    return df
+
+
+def compute_basic_linguistic_features(df: pd.DataFrame, text_column: str = 'text') -> pd.DataFrame:
+    """Compute fast linguistic features (word count, avg length, etc.).
+    
+    Args:
+        df: Input dataframe
+        text_column: Name of column containing text to analyze
+        
+    Returns:
+        DataFrame with added columns:
+        - word_count: total words
+        - avg_word_length: characters per word
+        - avg_words_per_sentence: words per sentence
+        - unique_word_fraction: lexical diversity (0-1)
+        - flesch_kincaid: reading grade level
+    """
+    print(f"Computing basic linguistic features on column: {text_column}")
+    
+    try:
+        import textstat
+    except:
+        textstat = None
+    
+    print("\n1. Word count...")
+    try:
+        tqdm.pandas(desc="   Processing word_count")
+        df['word_count'] = df[text_column].fillna('').progress_apply(lambda x: len(str(x).split()))
+    except (AttributeError, ImportError):
+        df['word_count'] = df[text_column].fillna('').apply(lambda x: len(str(x).split()))
+    print(f"   ✓ Mean: {df['word_count'].mean():.0f}")
+    
+    print("\n2. Average word length...")
+    def avg_word_len(text):
+        words = str(text).split()
+        return np.mean([len(w) for w in words]) if words else 0.0
+    try:
+        tqdm.pandas(desc="   Processing avg_word_length")
+        df['avg_word_length'] = df[text_column].fillna('').progress_apply(avg_word_len)
+    except (AttributeError, ImportError):
+        df['avg_word_length'] = df[text_column].fillna('').apply(avg_word_len)
+    print(f"   ✓ Mean: {df['avg_word_length'].mean():.2f} chars")
+    
+    print("\n3. Average words per sentence...")
+    def words_per_sentence(text):
+        text_str = str(text)
+        if not text_str.strip():
+            return 0.0
+        sentences = [s.strip() for s in re.split(r'[.!?]', text_str) if s.strip()]
+        if not sentences:
+            return 0.0
+        return np.mean([len(s.split()) for s in sentences])
+    try:
+        tqdm.pandas(desc="   Processing avg_words_per_sentence")
+        df['avg_words_per_sentence'] = df[text_column].fillna('').progress_apply(words_per_sentence)
+    except (AttributeError, ImportError):
+        df['avg_words_per_sentence'] = df[text_column].fillna('').apply(words_per_sentence)
+    print(f"   ✓ Mean: {df['avg_words_per_sentence'].mean():.1f}")
+    
+    print("\n4. Unique word fraction...")
+    def unique_fraction(text):
+        words = str(text).lower().split()
+        if not words:
+            return 0.0
+        return len(set(words)) / len(words)
+    try:
+        tqdm.pandas(desc="   Processing unique_word_fraction")
+        df['unique_word_fraction'] = df[text_column].fillna('').progress_apply(unique_fraction)
+    except (AttributeError, ImportError):
+        df['unique_word_fraction'] = df[text_column].fillna('').apply(unique_fraction)
+    print(f"   ✓ Mean: {df['unique_word_fraction'].mean():.3f}")
+    
+    print("\n5. Flesch-Kincaid grade level...")
+    if textstat:
+        try:
+            tqdm.pandas(desc="   Processing flesch_kincaid")
+            df['flesch_kincaid'] = df[text_column].fillna('').progress_apply(
+                lambda x: textstat.flesch_kincaid_grade(str(x)) if x else 0.0
+            )
+        except (AttributeError, ImportError):
+            df['flesch_kincaid'] = df[text_column].fillna('').apply(
+                lambda x: textstat.flesch_kincaid_grade(str(x)) if x else 0.0
+            )
+        print(f"   ✓ Mean: {df['flesch_kincaid'].mean():.1f}")
+    else:
+        df['flesch_kincaid'] = 0.0
+    
+    print("✓ Basic linguistic features computed")
+    return df
+
+
+def compute_advanced_linguistic_features(df: pd.DataFrame, text_column: str = 'text') -> pd.DataFrame:
+    """Compute advanced linguistic features (MATTR, spelling - slow).
+    
+    Args:
+        df: Input dataframe
+        text_column: Name of column containing text to analyze
+        
+    Returns:
+        DataFrame with added columns:
+        - mattr: lexical richness (0-1)
+        - spelling_error_fraction: fraction of misspelled words (0-1)
+    """
+    print(f"Computing advanced linguistic features on column: {text_column}")
+    
+    try:
+        from lexicalrichness import LexicalRichness
+    except:
+        LexicalRichness = None
+    
+    try:
+        from spellchecker import SpellChecker
+        spell = SpellChecker()
+    except:
+        spell = None
+    
+    print("\n1. MATTR (lexical richness - slow)...")
+    if LexicalRichness:
+        mattr_scores = []
+        for text in tqdm(df[text_column].fillna(''), desc="   Processing MATTR"):
+            mattr_scores.append(mattr_score(text))
+        df['mattr'] = mattr_scores
+        df['mattr'] = df['mattr'].replace([None], np.nan)
+        print(f"   ✓ Mean: {df['mattr'].mean():.3f}")
+    else:
+        print("   ✗ LexicalRichness not available, setting mattr=NaN")
+        df['mattr'] = np.nan
+    
+    print("\n2. Spelling error fraction (slow)...")
+    if spell:
+        try:
+            tqdm.pandas(desc="   Processing spelling_error_fraction")
+            df['spelling_error_fraction'] = df[text_column].fillna('').progress_apply(
+                lambda x: spelling_error_fraction(str(x), spell)
+            )
+        except (AttributeError, ImportError):
+            df['spelling_error_fraction'] = df[text_column].fillna('').apply(
+                lambda x: spelling_error_fraction(str(x), spell)
+            )
+        print(f"   ✓ Mean: {df['spelling_error_fraction'].mean():.3f}")
+    else:
+        print("   ✗ SpellChecker not available, setting spelling_error_fraction=0")
+        df['spelling_error_fraction'] = 0.0
+    
+    print("✓ Advanced linguistic features computed")
+    return df
+
+
 def compute_linguistic_features(df: pd.DataFrame, text_column: str = 'text') -> pd.DataFrame:
-    """Compute comprehensive linguistic features.
+    """Compute comprehensive linguistic features (legacy combined function).
+    
+    This is the original monolithic function, kept for backward compatibility.
+    For better checkpointing, use the modular functions separately:
+    - compute_syntactic_complexity()
+    - compute_cohesion()
+    - compute_basic_linguistic_features()
+    - compute_advanced_linguistic_features()
     
     Args:
         df: Input dataframe
@@ -142,117 +365,12 @@ def compute_linguistic_features(df: pd.DataFrame, text_column: str = 'text') -> 
         - spelling_error_fraction: fraction of misspelled words (0-1)
     """
     print(f"Computing linguistic features on column: {text_column}")
+    print("  ⚠️  Using monolithic function - consider using modular functions for checkpointing")
     
-    print("Loading NLP models...")
-    
-    try:
-        import spacy
-        nlp = spacy.load('en_core_web_md')
-        print("✓ spaCy loaded")
-    except:
-        print("✗ spaCy not available")
-        nlp = None
-    
-    try:
-        from spellchecker import SpellChecker
-        spell = SpellChecker()
-        print("✓ Spell checker loaded")
-    except:
-        print("✗ Spell checker not available")
-        spell = None
-    
-    try:
-        import textstat
-        print("✓ Textstat loaded")
-    except:
-        print("✗ Textstat not available")
-        textstat = None
-    
-    try:
-        from lexicalrichness import LexicalRichness
-        print("✓ Lexical richness loaded")
-    except:
-        print("✗ Lexical richness not available")
-        LexicalRichness = None
-    
-    print("\n1. Syntactic complexity...")
-    if nlp:
-        df['syntactic_complexity'] = syntactic_complexity_batch(
-            df[text_column].fillna('').tolist(), nlp
-        )
-        print(f"   ✓ Mean: {df['syntactic_complexity'].mean():.3f}")
-    else:
-        df['syntactic_complexity'] = 0.0
-    
-    print("\n2. Cohesion (slow)...")
-    if nlp:
-        cohesion_scores = []
-        for text in tqdm(df[text_column].fillna(''), desc="   Processing"):
-            cohesion_scores.append(cohesion_score(text, nlp))
-        df['cohesion'] = cohesion_scores
-        print(f"   ✓ Mean: {df['cohesion'].mean():.3f}")
-    else:
-        df['cohesion'] = None
-    
-    print("\n3. Word count...")
-    df['word_count'] = df[text_column].fillna('').apply(lambda x: len(str(x).split()))
-    print(f"   ✓ Mean: {df['word_count'].mean():.0f}")
-    
-    print("\n4. Average word length...")
-    def avg_word_len(text):
-        words = str(text).split()
-        return np.mean([len(w) for w in words]) if words else 0.0
-    df['avg_word_length'] = df[text_column].fillna('').apply(avg_word_len)
-    print(f"   ✓ Mean: {df['avg_word_length'].mean():.2f} chars")
-    
-    print("\n5. Average words per sentence...")
-    def words_per_sentence(text):
-        text_str = str(text)
-        if not text_str.strip():
-            return 0.0
-        sentences = [s.strip() for s in re.split(r'[.!?]', text_str) if s.strip()]
-        if not sentences:
-            return 0.0
-        return np.mean([len(s.split()) for s in sentences])
-    df['avg_words_per_sentence'] = df[text_column].fillna('').apply(words_per_sentence)
-    print(f"   ✓ Mean: {df['avg_words_per_sentence'].mean():.1f}")
-    
-    print("\n6. Unique word fraction...")
-    def unique_fraction(text):
-        words = str(text).lower().split()
-        if not words:
-            return 0.0
-        return len(set(words)) / len(words)
-    df['unique_word_fraction'] = df[text_column].fillna('').apply(unique_fraction)
-    print(f"   ✓ Mean: {df['unique_word_fraction'].mean():.3f}")
-    
-    print("\n7. Flesch-Kincaid grade level...")
-    if textstat:
-        df['flesch_kincaid'] = df[text_column].fillna('').apply(
-            lambda x: textstat.flesch_kincaid_grade(str(x)) if x else 0.0
-        )
-        print(f"   ✓ Mean: {df['flesch_kincaid'].mean():.1f}")
-    else:
-        df['flesch_kincaid'] = 0.0
-    
-    print("\n8. MATTR (lexical richness)...")
-    if LexicalRichness:
-        mattr_scores = []
-        for text in tqdm(df[text_column].fillna(''), desc="   Processing"):
-            mattr_scores.append(mattr_score(text))
-        df['mattr'] = mattr_scores
-        print(f"   ✓ Mean: {df['mattr'].mean():.3f}")
-    else:
-        df['mattr'] = None
-    
-    print("\n9. Spelling error fraction...")
-    if spell:
-        df['spelling_error_fraction'] = df[text_column].fillna('').apply(
-            lambda x: spelling_error_fraction(str(x), spell)
-        )
-        print(f"   ✓ Mean: {df['spelling_error_fraction'].mean():.3f}")
-    else:
-        df['spelling_error_fraction'] = 0.0
+    df = compute_syntactic_complexity(df, text_column)
+    df = compute_cohesion(df, text_column)
+    df = compute_basic_linguistic_features(df, text_column)
+    df = compute_advanced_linguistic_features(df, text_column)
     
     print("\n✓ All linguistic features computed")
     return df

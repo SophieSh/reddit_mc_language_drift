@@ -390,7 +390,7 @@ def run_fft_interpolation_wide(
     period_search_min: float = 10.0,
     period_search_max: float = 50.0,
 ) -> dict:
-    """Run FFT on interpolated data with WIDE search window (10-50 days).
+    """Run FFT on interpolated data with WIDE search window (configurable range).
     
     Apply "widen and filter" strategy: search broadly, filter to 24-35 in post-processing.
     
@@ -531,6 +531,8 @@ def analyze_user_timeline(
     feature_col: str = "text",
     period_min: float = DEFAULT_PERIOD_MIN,
     period_max: float = DEFAULT_PERIOD_MAX,
+    period_wide_min: float = 10.0,
+    period_wide_max: float = 50.0,
     normalize_method: str = "zscore",
     methods: list[str] | None = None,
 ) -> dict | None:
@@ -540,14 +542,16 @@ def analyze_user_timeline(
     - lomb_scargle: Astropy LS with FAP (searches 10-90 days)
     - fft_interpolation: FFT with linear interpolation (searches 24-35 days)
     - fft_zeropad: FFT with zero-padding (searches 24-35 days)
-    - fft_interpolation_wide: FFT interpolation wide search (10-50 days)
-    - fft_zeropad_wide: FFT zero-pad wide search (10-50 days)
+    - fft_interpolation_wide: FFT interpolation wide search (configurable range)
+    - fft_zeropad_wide: FFT zero-pad wide search (configurable range)
     
     Args:
         user_timeline: DataFrame with columns including 'offset_from_cd1' and feature_col
         feature_col: Column name for feature values (default: 'text' uses text length)
         period_min: Minimum period for biological relevance (days, default 24)
         period_max: Maximum period for biological relevance (days, default 35)
+        period_wide_min: Minimum period for wide FFT search (days, default 10)
+        period_wide_max: Maximum period for wide FFT search (days, default 50)
         normalize_method: Method to normalize feature values ("zscore", "minmax", or "none")
         methods: List of method names to run (default: all methods)
         
@@ -572,10 +576,13 @@ def analyze_user_timeline(
     else:
         user_timeline["_feature_value"] = user_timeline[feature_col]
     
+    # Determine which time column to use (dpo_days for DPO patterns, offset_from_cd1 for CD patterns)
+    time_col = "dpo_days" if "dpo_days" in user_timeline.columns and user_timeline["dpo_days"].notna().any() else "offset_from_cd1"
+    
     # Aggregate by day
     daily_agg = aggregate_by_day(
         user_timeline,
-        offset_col="offset_from_cd1",
+        offset_col=time_col,
         value_col="_feature_value",
         agg_func="mean"
     )
@@ -587,7 +594,9 @@ def analyze_user_timeline(
     if daily_agg["feature_mean"].nunique() == 1:
         return None  # Constant values, no signal
     
-    offsets = daily_agg["offset_from_cd1"].values
+    # Get the time column name from daily_agg (should match time_col used above)
+    time_col_name = "dpo_days" if "dpo_days" in daily_agg.columns else "offset_from_cd1"
+    offsets = daily_agg[time_col_name].values
     values = daily_agg["feature_mean"].values
     
     # Normalize feature values per user to make amplitudes comparable
@@ -635,7 +644,12 @@ def analyze_user_timeline(
         })
     
     if "fft_interpolation_wide" in methods:
-        fft_interp_wide_result = run_fft_interpolation_wide(offsets, values_norm, period_search_min=10.0, period_search_max=50.0)
+        # Debug: verify parameters are being used
+        fft_interp_wide_result = run_fft_interpolation_wide(
+            offsets, values_norm, 
+            period_search_min=period_wide_min, 
+            period_search_max=period_wide_max
+        )
         result.update({
             "fft_interp_wide_period": fft_interp_wide_result["best_period"],
             "fft_interp_wide_power": fft_interp_wide_result["best_power"],
@@ -643,7 +657,7 @@ def analyze_user_timeline(
         })
     
     if "fft_zeropad_wide" in methods:
-        fft_zeropad_wide_result = run_fft_zeropad_wide(offsets, values_norm, period_search_min=10.0, period_search_max=50.0)
+        fft_zeropad_wide_result = run_fft_zeropad_wide(offsets, values_norm, period_search_min=period_wide_min, period_search_max=period_wide_max)
         result.update({
             "fft_zeropad_wide_period": fft_zeropad_wide_result["best_period"],
             "fft_zeropad_wide_power": fft_zeropad_wide_result["best_power"],
@@ -809,6 +823,8 @@ def analyze_all_users_with_normalizations(
     user_col: str = "author",
     period_min: float = DEFAULT_PERIOD_MIN,
     period_max: float = DEFAULT_PERIOD_MAX,
+    period_wide_min: float = 10.0,
+    period_wide_max: float = 50.0,
     filter_range: bool = False,
     fap_threshold: float = 0.1,
     snr_threshold: float = 3.0,
@@ -826,6 +842,8 @@ def analyze_all_users_with_normalizations(
         user_col: Column name for user identifier
         period_min: Min period (used for narrow FFT, not for filtering)
         period_max: Max period (used for narrow FFT, not for filtering)
+        period_wide_min: Min period for wide FFT search (default: 10.0)
+        period_wide_max: Max period for wide FFT search (default: 50.0)
         filter_range: If True, filter results to period_min-period_max (default: False)
         fap_threshold: False Alarm Probability threshold for LS filtering (default: 0.1)
         snr_threshold: Peak-to-background threshold for FFT filtering (default: 3.0)
@@ -852,6 +870,8 @@ def analyze_all_users_with_normalizations(
                     feature_col=base_feature,
                     period_min=period_min,
                     period_max=period_max,
+                    period_wide_min=period_wide_min,
+                    period_wide_max=period_wide_max,
                     normalize_method=normalization,
                     methods=methods,
                 )
@@ -928,25 +948,39 @@ def analyze_all_users_with_normalizations(
     results_df = pd.DataFrame(results)
     print(f"✓ Analysis complete: {len(results_df)} results (before filtering)")
     
-    # Apply FAP filtering to LS results
+    # Apply FAP filtering to LS results (only if fap column exists)
     ls_before = (results_df["method"] == "lombscargle").sum()
-    ls_filtered = results_df[
-        (results_df["method"] == "lombscargle") & 
-        (results_df["fap"] < fap_threshold)
-    ]
-    ls_after = len(ls_filtered)
+    if ls_before > 0 and "fap" in results_df.columns:
+        ls_filtered = results_df[
+            (results_df["method"] == "lombscargle") & 
+            (results_df["fap"] < fap_threshold)
+        ]
+        ls_after = len(ls_filtered)
+    else:
+        ls_filtered = results_df[results_df["method"] == "lombscargle"]
+        ls_after = len(ls_filtered)
     
-    # Apply peak_to_background filtering to FFT results
+    # Apply peak_to_background filtering to FFT results (only if column exists)
     fft_results = results_df[results_df["method"] != "lombscargle"]
     fft_before = len(fft_results)
-    fft_filtered = fft_results[fft_results["peak_to_background"] > snr_threshold]
-    fft_after = len(fft_filtered)
+    if fft_before > 0 and "peak_to_background" in results_df.columns:
+        fft_filtered = fft_results[fft_results["peak_to_background"] > snr_threshold]
+        fft_after = len(fft_filtered)
+    else:
+        fft_filtered = fft_results
+        fft_after = len(fft_filtered)
     
     # Combine
     results_df = pd.concat([ls_filtered, fft_filtered], ignore_index=True)
     
-    print(f"  ✓ LS filtered by FAP < {fap_threshold}: {ls_before} → {ls_after} ({ls_before - ls_after} dropped)")
-    print(f"  ✓ FFT filtered by peak_to_background > {snr_threshold}: {fft_before} → {fft_after} ({fft_before - fft_after} dropped)")
+    if ls_before > 0 and "fap" in results_df.columns:
+        print(f"  ✓ LS filtered by FAP < {fap_threshold}: {ls_before} → {ls_after} ({ls_before - ls_after} dropped)")
+    elif ls_before > 0:
+        print(f"  ✓ LS results: {ls_before} (no FAP column, skipping filter)")
+    if fft_before > 0 and "peak_to_background" in results_df.columns:
+        print(f"  ✓ FFT filtered by peak_to_background > {snr_threshold}: {fft_before} → {fft_after} ({fft_before - fft_after} dropped)")
+    elif fft_before > 0:
+        print(f"  ✓ FFT results: {fft_before} (no peak_to_background column, skipping filter)")
     
     if filter_range:
         # Optional range filtering (applied to all methods)
