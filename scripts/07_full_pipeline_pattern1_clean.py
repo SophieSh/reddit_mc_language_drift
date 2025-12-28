@@ -23,6 +23,7 @@ Key Design Decisions:
 """
 
 import argparse
+import csv
 from pathlib import Path
 from datetime import datetime
 import pandas as pd
@@ -44,10 +45,13 @@ from src.preprocess import (
 from src.features import (
     compute_vader_sentiment,
     compute_textblob_sentiment,
-    compute_linguistic_features,
+    compute_syntactic_complexity,
+    compute_cohesion,
+    compute_basic_linguistic_features,
+    compute_advanced_linguistic_features,
 )
 from src.analysis import analyze_all_users_with_normalizations
-from src.visualization import plot_cycle_distributions
+from src.visualization import plot_cycle_distributions, aggregate_features_by_phase, plot_phase_analysis
 
 
 def main(
@@ -83,12 +87,15 @@ def main(
         with open(run_config_path, 'r') as f:
             run_cfg = yaml.safe_load(f) or {}
     
-    # Extract all parameters once (run config overrides command line, which overrides base config)
+    # Extract all parameters once (run config overrides command line defaults)
     patterns = patterns or run_cfg.get("patterns", ["pattern_1"])
     window_months = run_cfg.get("window_months", window_months)
     min_chars = run_cfg.get("min_chars", min_chars)
     posts_only = run_cfg.get("posts_only", posts_only)
     output_subdir = run_cfg.get("output_subdir", output_subdir)
+    # use_checkpoints: run config can override (if user passed --no-checkpoints, it's already False, so run_cfg won't change it)
+    if "use_checkpoints" in run_cfg:
+        use_checkpoints = run_cfg["use_checkpoints"]
     
     # Analysis configuration: run config → base config (required in base.yaml by design)
     analysis_cfg = cfg["analysis"]  # Will fail if missing - good, means base.yaml is incomplete
@@ -96,6 +103,8 @@ def main(
     normalization_method = run_cfg.get("normalization", analysis_cfg["normalization"])
     fap_threshold = run_cfg.get("fap_threshold", analysis_cfg["fap_threshold"])
     snr_threshold = run_cfg.get("snr_threshold", analysis_cfg["snr_threshold"])
+    period_wide_min = run_cfg.get("period_wide_min", analysis_cfg.get("period_wide_min", 10.0))
+    period_wide_max = run_cfg.get("period_wide_max", analysis_cfg.get("period_wide_max", 50.0))
     
     # Setup directories
     raw_dir = Path(cfg["paths"]["raw"])
@@ -126,8 +135,8 @@ def main(
         'avg_word_length',         # Average characters per word
         'avg_words_per_sentence',  # Average words per sentence
         'unique_word_fraction',    # Lexical diversity (0-1)
-        'syntactic_complexity',    # Subordinate clauses per sentence
-        'cohesion',                # Semantic similarity (0-1)
+        'syntactic_complexity',    # Syntactic complexity (subordinate clauses per sentence)
+        'cohesion',                # Semantic cohesion between sentences (0-1)
         'flesch_kincaid',          # Reading grade level
         'mattr',                   # MATTR - Moving Average Type-Token Ratio (lexical richness)
         'spelling_error_fraction', # Fraction of misspelled words (0-1)
@@ -152,8 +161,29 @@ def main(
                        for source in required_sources 
                        if f"{source}_posts" in cfg["paths"]["files"]]
     else:  # dpo
-        # For DPO patterns: always use moon3
-        posts_files = [cfg["paths"]["files"]["moon3_posts"]]
+        # For DPO patterns: collect .tsv files from moon3/ subdirectory
+        posts_files = []
+        
+        # Look in moon3/ subdirectory for both patterns (only .tsv files)
+        moon3_subdir = raw_dir / "moon3"
+        if moon3_subdir.exists():
+            # Pattern 1: filteredRS_*.tsv
+            filtered_files = [f for f in sorted(moon3_subdir.glob("filteredRS_*.tsv")) if f.suffix == ".tsv"]
+            if filtered_files:
+                posts_files.extend([str(f.relative_to(raw_dir)) for f in filtered_files])
+            
+            # Pattern 2: moon3_all_posts*.tsv
+            moon3_posts_files = [f for f in sorted(moon3_subdir.glob("moon3_all_posts*.tsv")) if f.suffix == ".tsv"]
+            if moon3_posts_files:
+                posts_files.extend([str(f.relative_to(raw_dir)) for f in moon3_posts_files])
+        
+        # Fallback to config if nothing found
+        if not posts_files:
+            posts_files = [cfg["paths"]["files"].get("moon3_posts", "moon3_all_posts*.tsv")]
+            print(f"  ⚠️  Warning: No moon3 posts files found, using config: {posts_files[0]}")
+        
+        # Remove duplicates while preserving order
+        posts_files = list(dict.fromkeys(posts_files))
     
     print("="*70)
     print(f"FULL PIPELINE: Periodicity Analysis")
@@ -167,6 +197,8 @@ def main(
     print(f"  Normalization: {normalization_method}")
     print(f"  SNR threshold: {snr_threshold}")
     print(f"  FAP threshold: {fap_threshold}")
+    if "fft_interpolation_wide" in analysis_methods or "fft_zeropad_wide" in analysis_methods:
+        print(f"  Wide FFT search range: {period_wide_min}-{period_wide_max} days")
     print(f"  Checkpoints: {'Enabled' if use_checkpoints and not force_recompute else 'Disabled'}")
     if output_subdir:
         print(f"  Output subdir: {output_subdir}")
@@ -175,7 +207,7 @@ def main(
     # ========================================================================
     # STEP 1: Load users database
     # ========================================================================
-    print("\n[Step 1/10] Loading users database...")
+    print("\n[Step 1/11] Loading users database...")
     users_df = load_users_database(cfg, db_type=pattern_type)
     
     # Filter to specified patterns if needed
@@ -189,7 +221,7 @@ def main(
     # ========================================================================
     # STEP 2: Load & filter posts
     # ========================================================================
-    print(f"\n[Step 2/10] Loading & filtering posts (min_chars={min_chars})...")
+    print(f"\n[Step 2/11] Loading & filtering posts (min_chars={min_chars})...")
     
     patterns_str = "_".join(patterns)
     posts_checkpoint = find_latest_file(interim_dir, f"posts_{patterns_str}_filtered_minchars{min_chars}_*.csv")
@@ -199,39 +231,99 @@ def main(
         posts_df = pd.read_csv(posts_checkpoint, encoding='utf-8-sig', low_memory=False)
         print(f"  ✓ Loaded {len(posts_df):,} posts")
     else:
-        # Load posts from all required source files
-        all_posts = []
+        # Load posts from all required source files, saving incrementally to avoid memory issues
+        checkpoint_prefix = f"posts_{patterns_str}_filtered_minchars{min_chars}"
+        
+        # Prepare checkpoint path (will append to this file)
+        timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+        posts_checkpoint = interim_dir / f"{checkpoint_prefix}_{timestamp}.csv"
+        posts_checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        
+        file_exists = False
+        total_loaded = 0
+        
         for posts_filename in posts_files:
             posts_path = raw_dir / posts_filename
             if posts_path.exists():
                 print(f"  Loading {posts_filename}...")
                 posts_df_chunk = load_posts_from_raw(posts_path, target_users, min_chars=min_chars)
-                all_posts.append(posts_df_chunk)
                 print(f"    ✓ Loaded {len(posts_df_chunk):,} posts")
+                
+                if len(posts_df_chunk) > 0:
+                    # Append to checkpoint file in chunks to avoid memory issues
+                    chunk_size = 1_000_000
+                    
+                    if len(posts_df_chunk) > chunk_size:
+                        print(f"    Writing {len(posts_df_chunk):,} rows in chunks of {chunk_size:,}...")
+                        n_chunks = (len(posts_df_chunk) + chunk_size - 1) // chunk_size
+                        
+                        for i in range(n_chunks):
+                            start_idx = i * chunk_size
+                            end_idx = min((i + 1) * chunk_size, len(posts_df_chunk))
+                            chunk = posts_df_chunk.iloc[start_idx:end_idx]
+                            
+                            chunk.to_csv(
+                                posts_checkpoint,
+                                mode='a' if file_exists else 'w',
+                                header=not file_exists,
+                                index=False,
+                                encoding='utf-8-sig',
+                                quoting=csv.QUOTE_NONNUMERIC,
+                                escapechar='\\',
+                            )
+                            file_exists = True
+                            
+                            if (i + 1) % 5 == 0 or (i + 1) == n_chunks:
+                                print(f"      Progress: {end_idx:,}/{len(posts_df_chunk):,} rows ({100*end_idx/len(posts_df_chunk):.1f}%)")
+                    else:
+                        # Small chunk, write all at once
+                        posts_df_chunk.to_csv(
+                            posts_checkpoint,
+                            mode='a' if file_exists else 'w',
+                            header=not file_exists,
+                            index=False,
+                            encoding='utf-8-sig',
+                            quoting=csv.QUOTE_NONNUMERIC,
+                            escapechar='\\',
+                        )
+                        file_exists = True
+                    
+                    total_loaded += len(posts_df_chunk)
+                    print(f"    ✓ Appended to checkpoint (total so far: {total_loaded:,})")
             else:
                 print(f"  ⚠️  Warning: {posts_filename} not found, skipping")
         
-        if all_posts:
-            posts_df = pd.concat(all_posts, ignore_index=True)
-            # Remove duplicates if any (in case users appear in multiple files)
-            posts_df = posts_df.drop_duplicates(subset=["id"], keep="first")
-            print(f"  ✓ Total: {len(posts_df):,} posts after deduplication")
-        else:
+        if not file_exists:
             raise FileNotFoundError("No posts files found for specified patterns")
         
-        posts_checkpoint = save_with_timestamp(
-            posts_df, interim_dir, f"posts_{patterns_str}_filtered_minchars{min_chars}"
-        )
-        print(f"  ✓ Saved: {posts_checkpoint.name}")
+        print(f"  ✓ Total: {total_loaded:,} posts saved to {posts_checkpoint.name}")
+        
+        # Now load the saved file for deduplication (if needed)
+        # For very large files, we might skip deduplication or do it in chunks
+        print(f"  Loading saved file for deduplication...")
+        posts_df = pd.read_csv(posts_checkpoint, encoding='utf-8-sig', low_memory=False)
+        
+        # Remove duplicates if any (in case users appear in multiple files)
+        original_len = len(posts_df)
+        posts_df = posts_df.drop_duplicates(subset=["id"], keep="first")
+        if len(posts_df) < original_len:
+            print(f"  Removed {original_len - len(posts_df):,} duplicates")
+            # Save deduplicated version
+            posts_checkpoint = save_with_timestamp(
+                posts_df, interim_dir, checkpoint_prefix
+            )
+            print(f"  ✓ Saved deduplicated version: {posts_checkpoint.name}")
+        else:
+            print(f"  ✓ No duplicates found")
     
     # ========================================================================
     # STEP 3: Load & filter comments (optional)
     # ========================================================================
     if posts_only:
-        print(f"\n[Step 3/10] Skipping comments (--posts-only flag)")
+        print(f"\n[Step 3/11] Skipping comments (--posts-only flag)")
         comments_df = None
     else:
-        print(f"\n[Step 3/10] Loading & filtering comments (min_chars={min_chars})...")
+        print(f"\n[Step 3/11] Loading & filtering comments (min_chars={min_chars})...")
         print("  ⚠️  This may take 10-20 minutes for 40GB file...")
         
         comments_checkpoint = find_latest_file(interim_dir, f"comments_pattern1_filtered_minchars{min_chars}_*.csv")
@@ -254,7 +346,7 @@ def main(
     # ========================================================================
     # STEP 4: Preprocess posts & comments
     # ========================================================================
-    print(f"\n[Step 4/10] Preprocessing posts & comments...")
+    print(f"\n[Step 4/11] Preprocessing posts & comments...")
     
     content_type_suffix = "postsonly" if posts_only else "all"
     posts_prep_checkpoint = find_latest_file(interim_dir, f"posts_pattern1_preprocessed_{content_type_suffix}_*.csv")
@@ -281,9 +373,10 @@ def main(
         print(f"  ✓ Posts: {len(posts_df):,}, Comments: {len(comments_df):,}")
     
     # ========================================================================
-    # STEP 5: Add offsets from CD1
+    # STEP 5: Add offsets from anchors (CD1 or DPO)
     # ========================================================================
-    print(f"\n[Step 5/10] Adding offsets from CD1...")
+    step5_label = "Adding offsets from anchors" + (f" ({pattern_type.upper()})" if pattern_type == "dpo" else " (CD)")
+    print(f"\n[Step 5/11] {step5_label}...")
     
     posts_offset_checkpoint = find_latest_file(interim_dir, f"posts_pattern1_with_offsets_{content_type_suffix}_*.csv")
     comments_offset_checkpoint = find_latest_file(interim_dir, f"comments_pattern1_with_offsets_{content_type_suffix}_*.csv") if not posts_only else None
@@ -294,10 +387,10 @@ def main(
         if not posts_only:
             comments_df = pd.read_csv(comments_offset_checkpoint, encoding='utf-8-sig', low_memory=False)
     else:
-        anchors = build_anchor_dict(users_df)
-        posts_df = add_offsets_from_anchors(posts_df, anchors, author_col='author', timestamp_col='ts_utc')
+        anchors = build_anchor_dict(users_df, pattern_type=pattern_type)
+        posts_df = add_offsets_from_anchors(posts_df, anchors, author_col='author', timestamp_col='ts_utc', pattern_type=pattern_type)
         if not posts_only:
-            comments_df = add_offsets_from_anchors(comments_df, anchors, author_col='author', timestamp_col='ts_utc')
+            comments_df = add_offsets_from_anchors(comments_df, anchors, author_col='author', timestamp_col='ts_utc', pattern_type=pattern_type)
         
         save_with_timestamp(posts_df, interim_dir, f"posts_pattern1_with_offsets_{content_type_suffix}")
         if not posts_only:
@@ -312,7 +405,7 @@ def main(
     # ========================================================================
     # STEP 6: Filter by anchor window
     # ========================================================================
-    print(f"\n[Step 6/10] Filtering to ±{window_months} months of anchor...")
+    print(f"\n[Step 6/11] Filtering to ±{window_months} months of anchor...")
     print(f"  ⚠️  This is KEY: analyzing shorter windows reduces noise from long-term drift")
     
     posts_window_checkpoint = find_latest_file(interim_dir, f"posts_pattern1_{window_months}mo_{content_type_suffix}_*.csv")
@@ -342,9 +435,9 @@ def main(
     # STEP 7: Combine into timeline
     # ========================================================================
     if posts_only:
-        print(f"\n[Step 7/10] Creating timeline (posts only)...")
+        print(f"\n[Step 7/11] Creating timeline (posts only)...")
     else:
-        print(f"\n[Step 7/10] Combining posts + comments into timeline...")
+        print(f"\n[Step 7/11] Combining posts + comments into timeline...")
     
     timeline_checkpoint = find_latest_file(interim_dir, f"timeline_pattern1_{window_months}mo_{content_type_suffix}_*.csv")
     
@@ -374,42 +467,102 @@ def main(
     # ========================================================================
     # STEP 8: Compute sentiment & linguistic features
     # ========================================================================
-    print(f"\n[Step 8/10] Computing sentiment & linguistic features...")
-    print("  ⚠️  This may take 10-15 minutes...")
+    print(f"\n[Step 8/11] Computing sentiment & linguistic features...")
+    print("  ⚠️  This may take 15-30 minutes for large datasets...")
     
-    features_checkpoint = find_latest_file(interim_dir, f"timeline_pattern1_{window_months}mo_{content_type_suffix}_with_features_*.csv")
+    features_checkpoint = find_latest_file(interim_dir, f"timeline_{patterns_str}_{window_months}mo_{content_type_suffix}_with_features_*.csv")
+    vader_checkpoint = find_latest_file(interim_dir, f"timeline_{patterns_str}_{window_months}mo_{content_type_suffix}_with_vader_*.csv")
+    textblob_checkpoint = find_latest_file(interim_dir, f"timeline_{patterns_str}_{window_months}mo_{content_type_suffix}_with_textblob_*.csv")
+    syntax_checkpoint = find_latest_file(interim_dir, f"timeline_{patterns_str}_{window_months}mo_{content_type_suffix}_with_syntax_*.csv")
+    cohesion_checkpoint = find_latest_file(interim_dir, f"timeline_{patterns_str}_{window_months}mo_{content_type_suffix}_with_cohesion_*.csv")
+    basic_ling_checkpoint = find_latest_file(interim_dir, f"timeline_{patterns_str}_{window_months}mo_{content_type_suffix}_with_basic_ling_*.csv")
     
     if use_checkpoints and not force_recompute and features_checkpoint:
-        print(f"  ✓ Found checkpoint: {features_checkpoint.name}")
+        print(f"  ✓ Found complete features checkpoint: {features_checkpoint.name}")
         timeline_df = pd.read_csv(features_checkpoint, encoding='utf-8-sig', low_memory=False)
     else:
-        print("    Computing VADER sentiment (compound, positive, negative)...")
-        timeline_df = compute_vader_sentiment(timeline_df, text_column='text')
+        # Checkpoint 1: VADER sentiment
+        if use_checkpoints and not force_recompute and vader_checkpoint:
+            print(f"  ✓ Found VADER checkpoint: {vader_checkpoint.name}")
+            timeline_df = pd.read_csv(vader_checkpoint, encoding='utf-8-sig', low_memory=False)
+        else:
+            print("    [1/6] Computing VADER sentiment (compound, positive, negative)...")
+            timeline_df = compute_vader_sentiment(timeline_df, text_column='text')
+            vader_checkpoint = save_with_timestamp(
+                timeline_df, interim_dir, f"timeline_{patterns_str}_{window_months}mo_{content_type_suffix}_with_vader"
+            )
+            print(f"  ✓ Saved VADER checkpoint: {vader_checkpoint.name}")
         
-        print("    Computing TextBlob sentiment (polarity, subjectivity, intensity)...")
-        timeline_df = compute_textblob_sentiment(timeline_df, text_column='text')
+        # Checkpoint 2: TextBlob sentiment
+        if use_checkpoints and not force_recompute and textblob_checkpoint:
+            print(f"  ✓ Found TextBlob checkpoint: {textblob_checkpoint.name}")
+            timeline_df = pd.read_csv(textblob_checkpoint, encoding='utf-8-sig', low_memory=False)
+        else:
+            print("    [2/6] Computing TextBlob sentiment (polarity, subjectivity, intensity)...")
+            timeline_df = compute_textblob_sentiment(timeline_df, text_column='text')
+            textblob_checkpoint = save_with_timestamp(
+                timeline_df, interim_dir, f"timeline_{patterns_str}_{window_months}mo_{content_type_suffix}_with_textblob"
+            )
+            print(f"  ✓ Saved TextBlob checkpoint: {textblob_checkpoint.name}")
         
-        print("    Computing linguistic features (word_count, syntactic_complexity)...")
-        timeline_df = compute_linguistic_features(timeline_df, text_column='text')
+        # Checkpoint 3: Syntactic complexity (SLOW - spaCy)
+        if use_checkpoints and not force_recompute and syntax_checkpoint:
+            print(f"  ✓ Found syntactic complexity checkpoint: {syntax_checkpoint.name}")
+            timeline_df = pd.read_csv(syntax_checkpoint, encoding='utf-8-sig', low_memory=False)
+        else:
+            print("    [3/6] Computing syntactic complexity (SLOW - spaCy)...")
+            timeline_df = compute_syntactic_complexity(timeline_df, text_column='text')
+            syntax_checkpoint = save_with_timestamp(
+                timeline_df, interim_dir, f"timeline_{patterns_str}_{window_months}mo_{content_type_suffix}_with_syntax"
+            )
+            print(f"  ✓ Saved syntactic complexity checkpoint: {syntax_checkpoint.name}")
+        
+        # Checkpoint 4: Cohesion (VERY SLOW - spaCy)
+        if use_checkpoints and not force_recompute and cohesion_checkpoint:
+            print(f"  ✓ Found cohesion checkpoint: {cohesion_checkpoint.name}")
+            timeline_df = pd.read_csv(cohesion_checkpoint, encoding='utf-8-sig', low_memory=False)
+        else:
+            print("    [4/6] Computing cohesion (VERY SLOW - spaCy)...")
+            timeline_df = compute_cohesion(timeline_df, text_column='text')
+            cohesion_checkpoint = save_with_timestamp(
+                timeline_df, interim_dir, f"timeline_{patterns_str}_{window_months}mo_{content_type_suffix}_with_cohesion"
+            )
+            print(f"  ✓ Saved cohesion checkpoint: {cohesion_checkpoint.name}")
+        
+        # Checkpoint 5: Basic linguistic features (FAST)
+        if use_checkpoints and not force_recompute and basic_ling_checkpoint:
+            print(f"  ✓ Found basic linguistic checkpoint: {basic_ling_checkpoint.name}")
+            timeline_df = pd.read_csv(basic_ling_checkpoint, encoding='utf-8-sig', low_memory=False)
+        else:
+            print("    [5/6] Computing basic linguistic features (word_count, flesch_kincaid, etc.)...")
+            timeline_df = compute_basic_linguistic_features(timeline_df, text_column='text')
+            basic_ling_checkpoint = save_with_timestamp(
+                timeline_df, interim_dir, f"timeline_{patterns_str}_{window_months}mo_{content_type_suffix}_with_basic_ling"
+            )
+            print(f"  ✓ Saved basic linguistic checkpoint: {basic_ling_checkpoint.name}")
+        
+        # Step 6: Advanced linguistic features (SLOW - MATTR, spelling)
+        print("    [6/6] Computing advanced linguistic features (MATTR, spelling)...")
+        timeline_df = compute_advanced_linguistic_features(timeline_df, text_column='text')
         
         features_checkpoint = save_with_timestamp(
-            timeline_df, interim_dir, f"timeline_pattern1_{window_months}mo_{content_type_suffix}_with_features"
+            timeline_df, interim_dir, f"timeline_{patterns_str}_{window_months}mo_{content_type_suffix}_with_features"
         )
-        print(f"  ✓ Saved: {features_checkpoint.name}")
+        print(f"  ✓ Saved complete features checkpoint: {features_checkpoint.name}")
     
     # ========================================================================
     # STEP 9: Run periodicity detection
     # ========================================================================
-    print(f"\n[Step 9/10] Running periodicity detection...")
+    print(f"\n[Step 9/11] Running periodicity detection...")
     print(f"  ⚠️  This may take 10-15 minutes...")
     print(f"  Methods: {', '.join(analysis_methods)}")
     print(f"  Normalization: {normalization_method} (per-user)")
     
     methods_str = "_".join(analysis_methods)
-    # periodicity_checkpoint = find_latest_file(
-    #     interim_dir, 
-    #     f"periodicity_results_{patterns_str}_{window_months}mo_{content_type_suffix}_{normalization_method}_{methods_str}_snr{snr_threshold}_*.csv"
-    # )
+    periodicity_checkpoint = find_latest_file(
+        interim_dir, 
+        f"periodicity_results_{patterns_str}_{window_months}mo_{content_type_suffix}_{normalization_method}_{methods_str}_snr{snr_threshold}_*.csv"
+    )
     periodicity_checkpoint = None
     if use_checkpoints and not force_recompute and periodicity_checkpoint:
         print(f"  ✓ Found checkpoint: {periodicity_checkpoint.name}")
@@ -424,8 +577,10 @@ def main(
             base_features=base_features,
             normalizations=[normalization_method],
             user_col='author',
-            period_min=24.0,
+            period_min=21.0,
             period_max=35.0,
+            period_wide_min=period_wide_min,
+            period_wide_max=period_wide_max,
             filter_range=False,
             fap_threshold=fap_threshold,
             snr_threshold=snr_threshold,
@@ -441,9 +596,9 @@ def main(
     print(f"  ✓ {len(results_df):,} analyses for {results_df['user'].nunique():,} users")
     
     # ========================================================================
-    # STEP 10: Visualize results
+    # STEP 10: Visualize cycle length distributions
     # ========================================================================
-    print(f"\n[Step 10/10] Visualizing cycle length distributions...")
+    print(f"\n[Step 10/11] Visualizing cycle length distributions...")
     
     if len(results_df) == 0:
         print(f"  ⚠ No results to visualize!")
@@ -451,8 +606,50 @@ def main(
         timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
         output_path = reports_dir / f"cycle_distributions_{patterns_str}_{normalization_method}_{methods_str}_{window_months}mo_{content_type_suffix}_snr{snr_threshold}_{timestamp}.png"
         
-        plot_cycle_distributions(results_df, base_features, output_path)
+        plot_cycle_distributions(results_df, base_features, output_path, period_wide_max=period_wide_max)
         print(f"  ✓ Saved: {output_path.name}")
+    
+    # ========================================================================
+    # STEP 11: Phase-based analysis and visualization
+    # ========================================================================
+    print(f"\n[Step 11/11] Computing phase-based analysis...")
+    
+    if len(results_df) == 0:
+        print(f"  ⚠ No results for phase analysis!")
+    else:
+        # Determine time column based on pattern type
+        time_col = "dpo_days" if pattern_type == "dpo" and "dpo_days" in timeline_df.columns and timeline_df["dpo_days"].notna().any() else "offset_from_cd1"
+        
+        # Use primary method for phase analysis (first in list, or fft_interpolation as default)
+        primary_method = analysis_methods[0] if analysis_methods else "fft_interpolation"
+        
+        print(f"  Using method: {primary_method}")
+        print(f"  Using time column: {time_col}")
+        
+        phase_df = aggregate_features_by_phase(
+            timeline_df=timeline_df,
+            results_df=results_df,
+            features=base_features,
+            time_col=time_col,
+            user_col='author',
+            method=primary_method,
+        )
+        
+        if len(phase_df) > 0:
+            timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+            phase_output_path = reports_dir / f"phase_analysis_{patterns_str}_{normalization_method}_{primary_method}_{window_months}mo_{content_type_suffix}_snr{snr_threshold}_{timestamp}.png"
+            
+            plot_phase_analysis(phase_df, base_features, phase_output_path)
+            print(f"  ✓ Saved: {phase_output_path.name}")
+            
+            # Save phase data
+            phase_data_path = save_with_timestamp(
+                phase_df, reports_dir,
+                f"phase_analysis_{patterns_str}_{normalization_method}_{primary_method}_{window_months}mo_{content_type_suffix}_snr{snr_threshold}"
+            )
+            print(f"  ✓ Saved phase data: {phase_data_path.name}")
+        else:
+            print(f"  ⚠ No phase data aggregated (insufficient valid cycles)")
     
     # ========================================================================
     # SUMMARY
