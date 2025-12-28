@@ -1,14 +1,26 @@
 __pycache__/
 *.py[cod]
-.env
-.venv/
-.env.*
 .ipynb_checkpoints/
 .DS_Store
 .cursor/
 
-data/interim/
-data/processed/
-data/features/
+# Environment files
+.env
+.env.*
+.venv/
+.venv*/
+venv/
+env/
+ENV/
+virtualenv/
+
+# Data files (too large for git)
+data/
+!data/.gitkeep
+
+# Models and reports
 models/
-reports/figures/
+reports/
+
+# Old/exploratory code
+code_first_attemps/
