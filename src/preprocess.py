@@ -4,6 +4,10 @@ from pathlib import Path
 from datetime import datetime
 
 
+# Constants
+AVG_DAYS_PER_MONTH = 30.5
+
+
 # /////////////////////////////////////////////////////////////////////////////
 # BASIC DATA CLEANING
 # /////////////////////////////////////////////////////////////////////////////
@@ -67,7 +71,7 @@ def filter_posts_by_anchor_window(
         pd.to_datetime(posts_df['_anchor_ts'])
     ).dt.days.abs()
     
-    max_days = int(window_months * 30.44)
+    max_days = int(window_months * AVG_DAYS_PER_MONTH)
     filtered_df = posts_df[posts_df['_days_from_anchor'] <= max_days].copy()
     filtered_df = filtered_df.drop(columns=['_anchor_ts', '_days_from_anchor'])
     
@@ -79,6 +83,7 @@ def fix_removed_posts_selftext(df: pd.DataFrame) -> pd.DataFrame:
     This ensures that, for posts where title is informative but selftext was removed, we don't carry over junk.
     """
     df = df.copy()
+    #Creates a boolean Series (True/False mask)
     mask = df['selftext'].isin(['[removed]', '[deleted]'])
     df.loc[mask, 'selftext'] = ''
     return df
