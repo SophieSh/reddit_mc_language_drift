@@ -11,8 +11,11 @@ from scipy.optimize import curve_fit
 from src.analysis import aggregate_by_day
 
 
-def create_adaptive_phases(cycle_length: float) -> dict[str, tuple[int, int]]:
+def create_adaptive_phases(cycle_length: float, split_luteal: bool = False) -> dict[str, tuple[int, int]]:
     """Create phase definitions adapted to cycle length.
+    
+    Uses 0-indexed offsets where offset 0 = CD1 (first day of menstruation/anchor day).
+    Note: In medical convention, CD1 = Day 1, but we use 0-indexing for offsets.
     
     Biological fact: Cycle length variation comes primarily from FOLLICULAR phase.
     - Menstrual phase: ~4 days (relatively fixed)
@@ -20,14 +23,15 @@ def create_adaptive_phases(cycle_length: float) -> dict[str, tuple[int, int]]:
     - Ovulation: ~3 days (relatively fixed)
     - Luteal phase: ~14 days (relatively fixed, though can vary slightly)
     
-    For 28-day cycle: M(0-3), F(4-10=7d), O(11-13), L(14-27=14d)
-    For 32-day cycle: M(0-3), F(4-14=11d), O(15-17), L(18-31=14d) <- +4 days to follicular
+    For 28-day cycle: M(0-3)=CD1-4, F(4-10)=CD5-11, O(11-13)=CD12-14, L(14-27)=CD15-28
+    For 32-day cycle: M(0-3)=CD1-4, F(4-14)=CD5-15, O(15-17)=CD16-18, L(18-31)=CD19-32
     
     Args:
         cycle_length: Detected cycle length in days (24-35)
+        split_luteal: If True, split luteal phase into Early Luteal (7 days) and Late Luteal (7 days)
     
     Returns:
-        Dictionary of {phase_name: (start_day, end_day)}
+        Dictionary of {phase_name: (start_day, end_day)} where days are 0-indexed offsets
     """
     menstrual_len = 4
     ovulation_len = 3
@@ -44,12 +48,21 @@ def create_adaptive_phases(cycle_length: float) -> dict[str, tuple[int, int]]:
     luteal_start = ovulation_end + 1
     luteal_end = int(cycle_length - 1)
     
-    return {
+    phases = {
         'Menstrual': (0, menstrual_end),
         'Follicular': (follicular_start, follicular_end),
         'Ovulation': (ovulation_start, ovulation_end),
-        'Luteal': (luteal_start, luteal_end),
     }
+    
+    if split_luteal:
+        early_luteal_end = luteal_start + 6  # First 7 days (0-6 = 7 days)
+        late_luteal_start = early_luteal_end + 1
+        phases['Early Luteal'] = (luteal_start, early_luteal_end)
+        phases['Late Luteal'] = (late_luteal_start, luteal_end)
+    else:
+        phases['Luteal'] = (luteal_start, luteal_end)
+    
+    return phases
 
 
 def assign_phase_to_day(day: float, phase_definition: dict[str, tuple[int, int]]) -> str | None:
@@ -65,13 +78,10 @@ def assign_phase_to_day(day: float, phase_definition: dict[str, tuple[int, int]]
     Returns:
         Phase name or None
     """
-    cycle_length = max(end for _, end in phase_definition.values())
+    cycle_length = max(end for _, end in phase_definition.values()) + 1
     
-    # Wrap negative days
-    if day < 0:
-        day_normalized = cycle_length + (day % cycle_length)
-    else:
-        day_normalized = day % cycle_length
+    # Wrap days using modulo (Python's % already handles negatives correctly)
+    day_normalized = day % cycle_length
     
     for phase_name, (start, end) in phase_definition.items():
         if start <= day_normalized <= end:
