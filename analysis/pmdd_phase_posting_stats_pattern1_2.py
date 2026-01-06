@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.io import find_latest_file, parse_jsonl_file
 from src.visualization import create_adaptive_phases, assign_phase_to_day
+from src.analysis import assign_consensus_period_by_majority
 
 # Subreddit groups
 PMDD_SUBREDDITS = {"PMDD", "PMDDxADHD", "PMDDSharing"}
@@ -165,9 +166,9 @@ def main(split_luteal: bool = True, force_recompute_pmdd: bool = False):
     print(f"  ✓ Found {len(mh_posts):,} mental health posts from {mh_posts['author'].nunique():,} PMDD users")
     
     # ========================================================================
-    # Step 4: Load FFT periodicity results for detected cycle lengths
+    # Step 4: Load FFT periodicity results and compute consensus periods
     # ========================================================================
-    print("\n[Step 4/6] Loading FFT periodicity results (sentiment negative)...")
+    print("\n[Step 4/6] Loading FFT periodicity results and computing consensus periods...")
     
     # Look for files that contain fft_interpolation method (not just fft_interpolation_wide)
     # Files with both methods: "fft_interpolation_fft_interpolation_wide" 
@@ -186,7 +187,7 @@ def main(split_luteal: bool = True, force_recompute_pmdd: bool = False):
         results_file = max(all_files, key=lambda f: f.stat().st_mtime) if all_files else None
     
     if not results_file:
-        print("  ⚠️ Periodicity results not found! Using standard 28-day cycle.")
+        print("  ⚠️ Periodicity results not found! Using standard 29-day cycle.")
         user_periods = None
     else:
         print(f"  Loading: {results_file.name}")
@@ -194,36 +195,64 @@ def main(split_luteal: bool = True, force_recompute_pmdd: bool = False):
         
         snr_threshold = 3.0
         
-        # Filter to sentiment negatie feature + FFT interpolation method + SNR threshold
-        fft_results = results_df[
-            (results_df['feature'] == 'sentiment_negative') &
-            (results_df['method'] == 'fft_interpolation')
-        ].copy()
+        print(f"  Total results in file: {len(results_df):,} rows")
+        print(f"    Users: {results_df['user'].nunique():,}")
+        print(f"    Features: {results_df['feature'].unique() if 'feature' in results_df.columns else 'N/A'}")
+        print(f"    Methods: {results_df['method'].unique() if 'method' in results_df.columns else 'N/A'}")
         
-        if len(fft_results) == 0:
-            print("  ⚠️ No sentiment negative + fft_interpolation results found in this file!")
-            print(f"     Available methods in file: {results_df['method'].unique() if 'method' in results_df.columns else 'N/A'}")
-            print(f"     Available features in file: {results_df['feature'].unique() if 'feature' in results_df.columns else 'N/A'}")
+        # Filter to SNR >= threshold first (for all features and methods)
+        if 'peak_to_background' in results_df.columns:
+            filtered_results = results_df[
+                (results_df['period'].notna()) &
+                (results_df['peak_to_background'] >= snr_threshold)
+            ].copy()
+            print(f"  After filtering by SNR >= {snr_threshold}: {len(filtered_results):,} results")
+        else:
+            # If no peak_to_background column, just filter out NaN periods
+            filtered_results = results_df[results_df['period'].notna()].copy()
+            print(f"  After filtering NaN periods: {len(filtered_results):,} results (no SNR filtering available)")
+        
+        if len(filtered_results) == 0:
+            print("  ⚠️ No valid periodicity results after filtering!")
             print("     Using 29-day fallback for all.")
             user_periods = None
         else:
-            print(f"  Before filtering: {len(fft_results):,} users (pattern_1 + pattern_2)")
+            # Use consensus period function to get most popular period per user across all features
+            print(f"  Computing consensus periods across all features...")
+            consensus_df = assign_consensus_period_by_majority(
+                filtered_results,
+                user_col='user',
+                period_col='period',
+                feature_col='feature'
+            )
             
-            
-            # Filter to SNR >= threshold
-            fft_results = fft_results[
-                (fft_results['period'].notna()) &
-                (fft_results['peak_to_background'] >= snr_threshold)
-            ]
-            
-            print(f"  After SNR >= {snr_threshold}: {len(fft_results):,} users")
-            
-            # Get user -> period mapping
-            user_periods = dict(zip(fft_results['user'], fft_results['period']))
-            print(f"  ✓ Loaded sentiment negative periods for {len(user_periods):,} users (passed all filters)")
-            if len(user_periods) > 0:
-                print(f"    Mean detected period: {np.mean(list(user_periods.values())):.1f} days")
-                print(f"    Period range: {np.min(list(user_periods.values())):.1f} - {np.max(list(user_periods.values())):.1f} days")
+            print(f"  ✓ Consensus periods computed for {len(consensus_df):,} users")
+            if len(consensus_df) > 0:
+                # Filter to users with at least 5 features agreeing on consensus period
+                min_features_agreeing = 5
+                consensus_df_filtered = consensus_df[
+                    consensus_df['n_features_agreeing'] >= min_features_agreeing
+                ].copy()
+                
+                print(f"  After filtering (>= {min_features_agreeing} features agreeing): {len(consensus_df_filtered):,} users")
+                print(f"    Dropped: {len(consensus_df) - len(consensus_df_filtered):,} users with < {min_features_agreeing} features agreeing")
+                
+                if len(consensus_df_filtered) > 0:
+                    # Create user -> period mapping from filtered consensus results
+                    user_periods = dict(zip(consensus_df_filtered['user'], consensus_df_filtered['consensus_period']))
+                    
+                    # Show statistics
+                    print(f"    Mean consensus period: {np.mean(consensus_df_filtered['consensus_period']):.1f} days")
+                    print(f"    Period range: {np.min(consensus_df_filtered['consensus_period']):.1f} - {np.max(consensus_df_filtered['consensus_period']):.1f} days")
+                    print(f"    Mean features agreeing: {consensus_df_filtered['n_features_agreeing'].mean():.1f} features")
+                    print(f"    Min features agreeing: {consensus_df_filtered['n_features_agreeing'].min()}")
+                    print(f"    Max features agreeing: {consensus_df_filtered['n_features_agreeing'].max()}")
+                else:
+                    print(f"  ⚠️ No users with >= {min_features_agreeing} features agreeing!")
+                    print("     Using 29-day fallback for all.")
+                    user_periods = None
+            else:
+                user_periods = None
     
     # ========================================================================
     # Step 5: Match mental health posts to timeline & assign phases
@@ -293,7 +322,7 @@ def main(split_luteal: bool = True, force_recompute_pmdd: bool = False):
     print(f"3. Pattern_1 + Pattern_2 users in timeline: {len(timeline_users):,}")
     print(f"4. ↓ PMDD users in timeline: {len(pmdd_users_in_timeline):,} ({len(pmdd_users_in_timeline)/len(timeline_users)*100:.1f}% of timeline)")
     print(f"5. ↓ Posted in MH subs within timeline window: {n_pmdd_users_posted_mh_window} users, {n_mh_posts_in_timeline:,} posts")
-    print(f"\nFFT period detection (sentiment_negative, SNR >= 3.0):")
+    print(f"\nFFT period detection (consensus across all features, SNR >= 3.0):")
     print(f"   - Users with detected periods: {users_with_detected}")
     print(f"   - Users using 29-day fallback: {users_with_fallback}")
     print(f"   - Total users in analysis: {n_pmdd_users_posted_mh_window}")
@@ -335,7 +364,7 @@ def main(split_luteal: bool = True, force_recompute_pmdd: bool = False):
             depression_users = depression_posts['author'].nunique()
             suicide_users = suicide_posts['author'].nunique()
             
-            avg_sentiment = phase_posts['sentiment_negative'].mean() if 'sentiment_negative' in phase_posts.columns else None
+            avg_sentiment = phase_posts['sentiment_positive'].mean() if 'sentiment_positive' in phase_posts.columns else None
             
             phase_stats.append({
                 'Phase': phase,
@@ -345,7 +374,7 @@ def main(split_luteal: bool = True, force_recompute_pmdd: bool = False):
                 'Depression Users': depression_users,
                 'Suicide Posts': len(suicide_posts),
                 'Suicide Users': suicide_users,
-                'Avg Negative Sentiment': f"{avg_sentiment:.3f}" if avg_sentiment is not None else "N/A"
+                'Avg Positive Sentiment': f"{avg_sentiment:.3f}" if avg_sentiment is not None else "N/A"
             })
         
         phase_df = pd.DataFrame(phase_stats)
@@ -831,8 +860,8 @@ def main(split_luteal: bool = True, force_recompute_pmdd: bool = False):
                  'detected_period', 'has_fft_period', 'phase', 'created_utc']
     if 'text' in mh_posts.columns:
         save_cols.append('text')
-    if 'sentiment_negative' in mh_posts.columns:
-        save_cols.append('sentiment_negative')
+    if 'sentiment_positive' in mh_posts.columns:
+        save_cols.append('sentiment_positive')
     mh_posts[save_cols].to_csv(posts_out, index=False, encoding='utf-8-sig')
     print(f"  ✓ Saved post-level data: {posts_out.name}")
     
@@ -856,5 +885,24 @@ def main(split_luteal: bool = True, force_recompute_pmdd: bool = False):
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Analyze PMDD users' mental health posting by cycle phase")
+    parser.add_argument(
+        "--force-recompute-pmdd",
+        action="store_true",
+        help="Force recomputation of PMDD users (skip checkpoint)"
+    )
+    parser.add_argument(
+        "--no-split-luteal",
+        action="store_true",
+        help="Don't split luteal phase into Early/Late (use single Luteal phase)"
+    )
+    
+    args = parser.parse_args()
+    
+    main(
+        split_luteal=not args.no_split_luteal,
+        force_recompute_pmdd=args.force_recompute_pmdd
+    )
 
