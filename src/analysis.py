@@ -994,3 +994,67 @@ def analyze_all_users_with_normalizations(
     
     return results_df
 
+
+def assign_consensus_period_by_majority(
+    periodicity_results: pd.DataFrame,
+    user_col: str = "user",
+    period_col: str = "period",
+    feature_col: str = "feature",
+) -> pd.DataFrame:
+    """Assign consensus period to each user based on most popular period across features.
+    
+    For each user, finds the most frequently detected period across all features.
+    If there's a tie, uses the first one encountered.
+    
+    Typical periodicity results file columns:
+    - user, feature, method, period, power, peak_to_background, n_points, span_days
+    - (optionally: normalization)
+    
+    Args:
+        periodicity_results: DataFrame with columns: user_col, period_col, feature_col
+                           (and optionally method, normalization, power, etc.)
+                           Expected column names: "user", "feature", "period"
+        user_col: Column name for user identifier (default: "user")
+        period_col: Column name for detected period (default: "period")
+        feature_col: Column name for feature name (default: "feature")
+    
+    Returns:
+        DataFrame with columns: user_col, consensus_period, n_features_agreeing
+                               (one row per user)
+    
+    Example:
+        If for user X:
+        - 3 features returned 28 days
+        - 2 features returned 30 days
+        - 1 feature returned 25 days
+        Then consensus_period = 28 (most popular), n_features_agreeing = 3
+    """
+    # Filter to valid periods only (not NaN)
+    valid_results = periodicity_results[
+        periodicity_results[period_col].notna()
+    ].copy()
+    
+    if len(valid_results) == 0:
+        # Return empty DataFrame with correct columns
+        return pd.DataFrame(columns=[user_col, "consensus_period", "n_features_agreeing"])
+    
+    consensus_results = []
+    
+    for user, user_results in valid_results.groupby(user_col):
+        # Count frequency of each period for this user
+        period_counts = user_results[period_col].value_counts()
+        
+        # Get most popular period (mode)
+        consensus_period = period_counts.index[0]  # First one is most frequent
+        n_agreeing = period_counts.iloc[0]  # Number of features that detected this period
+        
+        consensus_results.append({
+            user_col: user,
+            "consensus_period": consensus_period,
+            "n_features_agreeing": n_agreeing,
+        })
+    
+    consensus_df = pd.DataFrame(consensus_results)
+    
+    return consensus_df
+
