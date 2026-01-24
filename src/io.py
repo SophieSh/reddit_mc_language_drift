@@ -121,6 +121,11 @@ def load_timeline_with_features(interim_dir: Path) -> pd.DataFrame | None:
 def find_periodicity_results(interim_dir: Path, prefer_long_format: bool = True) -> Path | None:
     """Find latest periodicity results file.
     
+    Looks for files matching:
+    - feature_periodicity_*.csv
+    - periodicity_results_*.csv
+    - consensus_periods_*.csv (preferred if available)
+    
     Args:
         interim_dir: Directory to search
         prefer_long_format: If True, prefer long format over table format
@@ -128,7 +133,13 @@ def find_periodicity_results(interim_dir: Path, prefer_long_format: bool = True)
     Returns:
         Path to results file or None
     """
+    # Try all naming patterns, prefer consensus files
+    consensus_files = list(interim_dir.glob("consensus_periods_*.csv"))
+    if consensus_files:
+        return max(consensus_files, key=lambda p: p.stat().st_mtime)
+    
     all_files = list(interim_dir.glob("feature_periodicity_*.csv"))
+    all_files.extend(interim_dir.glob("periodicity_results_*.csv"))
     
     if prefer_long_format:
         long_format = [f for f in all_files if 'table' not in f.name]

@@ -410,3 +410,40 @@ def load_posts_for_users(
     print(f"  Posts from target users: {len(df):,}")
     return df
 
+
+def filter_timeline_by_offset_days(
+    timeline_df: pd.DataFrame,
+    days_before: int = 90,
+    days_after: int = 90,
+    offset_col: str = "offset_from_cd1",
+) -> pd.DataFrame:
+    """Filter timeline DataFrame by offset days (e.g., ±90 days from CD1).
+    
+    Args:
+        timeline_df: Timeline DataFrame with offset column
+        days_before: Days before anchor to keep (default: 90)
+        days_after: Days after anchor to keep (default: 90)
+        offset_col: Column name for offset values (default: "offset_from_cd1")
+    
+    Returns:
+        Filtered DataFrame
+    """
+    if offset_col not in timeline_df.columns:
+        raise KeyError(f"Column '{offset_col}' not found in timeline DataFrame")
+    
+    before = len(timeline_df)
+    
+    filtered_df = timeline_df[
+        (timeline_df[offset_col] >= -days_before) &
+        (timeline_df[offset_col] <= days_after)
+    ].copy()
+    
+    after = len(filtered_df)
+    
+    if before != after:
+        print(f"  Filtered timeline to ±{days_before}/{days_after} days: {before:,} → {after:,} posts")
+    else:
+        print(f"  Timeline already within ±{days_before}/{days_after} days: {after:,} posts")
+    
+    return filtered_df
+

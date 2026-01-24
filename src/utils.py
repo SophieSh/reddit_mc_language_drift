@@ -114,7 +114,7 @@ def filter_posts_by_subreddits(
         target_subreddits: Set or list of subreddit names to keep
         output_path: If specified, save filtered posts to this file
         progress_interval: Print progress every N lines
-        
+    
     Returns:
         DataFrame with filtered posts
         
@@ -155,4 +155,127 @@ def filter_posts_by_subreddits(
         print(f"  ✓ Saved to: {output_path}")
     
     return df
+
+
+def extract_users_from_subreddits(
+    posts_files: list[Path | str],
+    target_subreddits: set[str] | list[str],
+    user_db_or_path: Path | str | pd.DataFrame | None = None,
+    user_col: str = "user",
+    progress_interval: int = 2_000_000,
+) -> pd.DataFrame:
+    """Find all users who posted in specific subreddits, return DataFrame with their posts.
+    
+    Searches through posts files to find posts from target subreddits.
+    If user_db_or_path is provided, only searches for posts from those users.
+    
+    Args:
+        posts_files: List of paths to posts files (CSV or TSV/JSONL format)
+        target_subreddits: Set or list of subreddit names to search
+        user_db_or_path: Optional users database (DataFrame or path to CSV). If provided, only search posts from these users.
+        user_col: Column name for user identifier in user_db (default: "user")
+        progress_interval: Print progress every N lines for JSONL files (default: 2M)
+    
+    Returns:
+        DataFrame with posts from target subreddits. Columns include: author, subreddit, created_utc, title, selftext, etc.
+    
+    Example:
+        >>> pmdd_subs = {"PMDD", "PMDDxADHD"}
+        >>> users_df = pd.read_csv("data/processed/users_database_CD_*.csv")
+        >>> posts = extract_users_from_subreddits(
+        ...     posts_files=["data/raw/moon1_posts.csv"],
+        ...     target_subreddits=pmdd_subs,
+        ...     user_db_or_path=users_df
+        ... )
+    """
+    target_subreddits = set(target_subreddits)
+    target_users = None
+    
+    # Load target users if user_db_or_path provided
+    if user_db_or_path is not None:
+        if isinstance(user_db_or_path, pd.DataFrame):
+            target_users = set(user_db_or_path[user_col].astype(str).unique())
+        else:
+            # Load from file
+            user_db_path = Path(user_db_or_path)
+            if not user_db_path.exists():
+                raise FileNotFoundError(f"User database not found: {user_db_path}")
+            user_db_df = pd.read_csv(user_db_path, encoding="utf-8-sig")
+            target_users = set(user_db_df[user_col].astype(str).unique())
+        
+        print(f"  Filtering to {len(target_users):,} target users")
+    
+    all_posts = []
+    
+    for posts_file in posts_files:
+        posts_path = Path(posts_file)
+        if not posts_path.exists():
+            print(f"  WARNING: File not found: {posts_path.name}, skipping")
+            continue
+        
+        print(f"  Processing: {posts_path.name}")
+        
+        # Determine file format and read accordingly
+        if posts_path.suffix == ".csv":
+            # CSV format (DataFrame)
+            print(f"    Reading CSV file...")
+            df = pd.read_csv(posts_path, encoding="utf-8-sig", low_memory=False)
+            print(f"    Loaded {len(df):,} posts")
+            
+            # Filter by subreddit
+            df = df[df["subreddit"].isin(target_subreddits)].copy()
+            print(f"    Found {len(df):,} posts in target subreddits")
+            
+            # Filter by users if provided
+            if target_users is not None:
+                before = len(df)
+                df = df[df["author"].astype(str).isin(target_users)].copy()
+                print(f"    Filtered to target users: {before:,} -> {len(df):,} posts")
+            
+            if len(df) > 0:
+                all_posts.append(df)
+        
+        elif posts_path.suffix in [".tsv", ".txt"]:
+            # TSV/JSONL format (streaming)
+            print(f"    Streaming through JSONL file...")
+            rows = []
+            total_processed = 0
+            
+            for data in parse_jsonl_file(posts_path, progress_interval=progress_interval):
+                total_processed += 1
+                subreddit = data.get("subreddit")
+                author = data.get("author")
+                
+                # Filter by subreddit
+                if subreddit not in target_subreddits:
+                    continue
+                
+                # Filter by users if provided
+                if target_users is not None and author not in target_users:
+                    continue
+                
+                rows.append(data)
+                
+                if len(rows) % 10000 == 0:
+                    print(f"      Found {len(rows):,} matching posts...", end="\r")
+            
+            print(f"\n    Found {len(rows):,} matching posts")
+            
+            if len(rows) > 0:
+                df = pd.DataFrame(rows)
+                all_posts.append(df)
+        
+        else:
+            print(f"    WARNING: Unsupported file format: {posts_path.suffix}, skipping")
+            continue
+    
+    if not all_posts:
+        print("  No matching posts found")
+        return pd.DataFrame()
+    
+    # Combine all DataFrames
+    result_df = pd.concat(all_posts, ignore_index=True)
+    print(f"  Total matching posts: {len(result_df):,} from {result_df['author'].nunique():,} users")
+    
+    return result_df
 
