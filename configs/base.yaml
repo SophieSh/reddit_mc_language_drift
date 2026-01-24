@@ -8,6 +8,10 @@ paths:
   features: data/features
   models: models
   reports: reports
+  # Analysis directories (for PMDD analysis pipeline)
+  analysis_dir: data/interim/test_pipeline_verify_28.12
+  # Periodicity results file pattern (optional, defaults to finding latest consensus_periods_*.csv)
+  periodicity_file: consensus_periods_min5features_*.csv
   
   files:
     # Anchor files (Excel/CSV with pattern matches - used in preprocessing)
@@ -16,8 +20,8 @@ paths:
     moon3_anchors: moon3.csv
     
     # Posts files (TSV with all posts from users - for timeline building)
-    moon1_posts: moon1_all_post_2015_2025.filtered.tsv
-    moon2_posts: moon2_all_posts_2010_2025.tsv
+    moon1_posts: moon1_all_post_2015_2025_filtered_features.csv
+    moon2_posts: moon2_all_post_2015_2025_filtered_features.csv
     moon3_posts: moon3_all_posts_2010_2025.tsv  # TODO: Add this file when available 
     
     # Comments file (shared across all patterns)
@@ -30,6 +34,27 @@ paths:
 reddit:
   min_chars: 100
   lang: "en"
+
+subreddits:
+  pmdd:
+    - PMDD
+    - PMDDxADHD
+    - PMDDSharing
+  depression:
+    - depression
+    - mentalhealth
+    - Anxiety
+    - socialanxiety
+    - AnxietyDepression
+  suicide:
+    - SuicideWatch
+  mental_health:
+    - depression
+    - mentalhealth
+    - Anxiety
+    - socialanxiety
+    - AnxietyDepression
+    - SuicideWatch
 
 features:
   sentiment: "vader"
