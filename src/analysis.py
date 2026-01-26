@@ -6,11 +6,13 @@ import pandas as pd
 from scipy import signal
 from scipy.fft import fft, fftfreq
 
-# Constants
-MIN_DATA_POINTS = 10
-EPSILON = 1e-10
-DEFAULT_PERIOD_MIN = 24
-DEFAULT_PERIOD_MAX = 35
+from src.config import (
+    MIN_DATA_POINTS,
+    EPSILON,
+    DEFAULT_PERIOD_MIN,
+    DEFAULT_PERIOD_MAX,
+    AVG_DAYS_PER_MONTH,
+)
 
 
 def normalize_values(values: np.ndarray, method: str = "zscore") -> np.ndarray:
@@ -125,6 +127,108 @@ def aggregate_by_day(
     daily_agg = daily_agg[daily_agg["feature_mean"].notna()].copy()
     
     return daily_agg
+
+
+def aggregate_all_features_by_day(
+    timeline_df: pd.DataFrame,
+    feature_cols: list[str],
+    user_col: str = "author",
+    time_col: str = "offset_from_cd1",
+) -> pd.DataFrame:
+    """Aggregate multiple posts per day into one data point by averaging features.
+    
+    Creates a NEW DataFrame where:
+    - Input: Multiple posts per day per user (original timeline with all posts)
+    - Output: One row per (user, day) with averaged feature values
+    
+    Args:
+        timeline_df: DataFrame with multiple posts per day, columns include feature_cols
+        feature_cols: List of feature column names to aggregate
+        user_col: Column name for user identifier
+        time_col: Column name for day/offset
+    
+    Returns:
+        NEW DataFrame with columns:
+        - user_col, time_col
+        - {feature}_mean for each feature (averaged across posts per day)
+    
+    Example:
+        Input timeline: user='Alice', day=5, feature_1=[0.5, 0.6, 0.7] (3 posts on same day)
+        Output: NEW row: user='Alice', day=5, feature_1_mean=0.6
+    """
+    df = timeline_df.copy()
+    
+    print(f"Aggregating {len(feature_cols)} features by (user, day)...")
+    
+    # Group by user and time, compute mean for each feature
+    agg_dict = {feature: "mean" for feature in feature_cols if feature in df.columns}
+    
+    if len(agg_dict) == 0:
+        raise ValueError(f"None of the feature columns found in DataFrame. Available columns: {df.columns.tolist()}")
+    
+    daily_agg = df.groupby([user_col, time_col]).agg(agg_dict).reset_index()
+    
+    # Rename feature columns to {feature}_mean
+    rename_dict = {}
+    for feature in feature_cols:
+        if feature in daily_agg.columns:
+            rename_dict[feature] = f"{feature}_mean"
+    
+    daily_agg = daily_agg.rename(columns=rename_dict)
+    
+    print(f"  ✓ Aggregated to {len(daily_agg)} (user, day) combinations")
+    
+    return daily_agg
+
+
+def normalize_features_per_user_zscore(
+    daily_agg_df: pd.DataFrame,
+    feature_mean_cols: list[str],
+    user_col: str = "author",
+) -> pd.DataFrame:
+    """Apply per-user z-score normalization to daily aggregated features.
+    
+    For each user, for each feature, calculates z-score across all their days.
+    Adds {feature}_zscore columns to the DataFrame.
+    
+    Args:
+        daily_agg_df: DataFrame with daily aggregated features (from aggregate_all_features_by_day)
+        feature_mean_cols: List of feature column names ending in _mean (e.g., ['feature_1_mean', 'feature_2_mean'])
+        user_col: Column name for user identifier
+    
+    Returns:
+        DataFrame with added {feature}_zscore columns
+    
+    Example:
+        Input: user='Alice', day=5, feature_1_mean=0.6
+        Output: user='Alice', day=5, feature_1_mean=0.6, feature_1_zscore = (0.6 - mean_Alice_feature1) / std_Alice_feature1
+    """
+    df = daily_agg_df.copy()
+    
+    print(f"Applying per-user z-score normalization to {len(feature_mean_cols)} features...")
+    
+    for mean_col in feature_mean_cols:
+        if mean_col not in df.columns:
+            print(f"  Warning: {mean_col} not found, skipping")
+            continue
+        
+        zscore_col = mean_col.replace("_mean", "_zscore")
+        
+        # Vectorized per-user normalization using groupby.transform
+        user_means = df.groupby(user_col)[mean_col].transform('mean')
+        user_stds = df.groupby(user_col)[mean_col].transform('std')
+        
+        # Calculate z-score, handling constant values (std=0) by setting to NaN
+        df[zscore_col] = (df[mean_col] - user_means) / (user_stds + EPSILON)
+        df[zscore_col] = df[zscore_col].replace([np.inf, -np.inf], np.nan)
+        
+        # Set to NaN where std was effectively zero (constant values)
+        df.loc[user_stds < EPSILON, zscore_col] = np.nan
+        
+        valid_count = df[zscore_col].notna().sum()
+        print(f"  ✓ {mean_col} → {zscore_col}: {valid_count} valid values")
+    
+    return df
 
 
 def run_lombscargle(
@@ -819,4 +923,347 @@ def calculate_phase_statistics(
         })
     
     return pd.DataFrame(phase_stats)
+
+
+def calculate_posts_before_after_ratio(
+    timeline_df: pd.DataFrame,
+    offset_col: str = 'offset_from_cd1',
+    user_col: str = 'author',
+) -> dict[str, float]:
+    """Calculate ratio of posts after anchor to posts before anchor for each user.
+    
+    For each user, computes:
+        ratio = posts_after_anchor / posts_before_anchor
+    
+    Where:
+        - posts_before_anchor: posts with offset < 0
+        - posts_after_anchor: posts with offset > 0
+        - Anchor day (offset = 0) is excluded from both counts
+    
+    Args:
+        timeline_df: Timeline DataFrame with offset column
+        offset_col: Column name for offset from anchor (default: 'offset_from_cd1')
+        user_col: Column name for user identifier (default: 'author')
+    
+    Returns:
+        Dictionary with:
+            - 'user_ratios': Series of ratios per user (indexed by user)
+            - 'mean_ratio': Average ratio across users
+            - 'median_ratio': Median ratio across users
+            - 'n_users': Number of users with valid ratios
+            - 'n_users_before_only': Number of users with only before-anchor posts
+            - 'n_users_after_only': Number of users with only after-anchor posts
+    """
+    timeline_df = timeline_df.copy()
+    
+    # Filter to users with valid offsets
+    valid_df = timeline_df[
+        timeline_df[offset_col].notna() & 
+        timeline_df[user_col].notna()
+    ].copy()
+    
+    if len(valid_df) == 0:
+        return {
+            'user_ratios': pd.Series(dtype=float),
+            'mean_ratio': np.nan,
+            'median_ratio': np.nan,
+            'n_users': 0,
+            'n_users_before_only': 0,
+            'n_users_after_only': 0,
+        }
+    
+    # Count posts before and after anchor for each user
+    user_counts = []
+    
+    for user in valid_df[user_col].unique():
+        user_data = valid_df[valid_df[user_col] == user]
+        
+        # Exclude anchor day (offset = 0)
+        before = len(user_data[user_data[offset_col] < 0])
+        after = len(user_data[user_data[offset_col] > 0])
+        
+        if before == 0 and after == 0:
+            continue  # Skip users with no posts before or after
+        
+        user_counts.append({
+            user_col: user,
+            'posts_before': before,
+            'posts_after': after,
+        })
+    
+    counts_df = pd.DataFrame(user_counts)
+    
+    # Calculate ratio (posts_after / posts_before)
+    # Handle edge cases:
+    # - before = 0, after > 0: ratio = inf (user only posts after anchor)
+    # - before > 0, after = 0: ratio = 0 (user only posts before anchor)
+    # - before > 0, after > 0: ratio = after / before
+    counts_df['ratio'] = np.where(
+        counts_df['posts_before'] == 0,
+        np.inf,  # Only after-anchor posts
+        counts_df['posts_after'] / counts_df['posts_before']
+    )
+    
+    # Separate users with valid ratios (both before and after)
+    valid_ratios = counts_df[
+        (counts_df['posts_before'] > 0) & (counts_df['posts_after'] > 0)
+    ]['ratio']
+    
+    before_only = len(counts_df[(counts_df['posts_before'] > 0) & (counts_df['posts_after'] == 0)])
+    after_only = len(counts_df[(counts_df['posts_before'] == 0) & (counts_df['posts_after'] > 0)])
+    
+    # Calculate statistics on valid ratios only (exclude inf and 0 from edge cases)
+    mean_ratio = valid_ratios.mean() if len(valid_ratios) > 0 else np.nan
+    median_ratio = valid_ratios.median() if len(valid_ratios) > 0 else np.nan
+    
+    return {
+        'user_ratios': counts_df.set_index(user_col)['ratio'],
+        'mean_ratio': mean_ratio,
+        'median_ratio': median_ratio,
+        'n_users': len(valid_ratios),
+        'n_users_before_only': before_only,
+        'n_users_after_only': after_only,
+        'counts_df': counts_df,  # Include full counts for detailed analysis
+    }
+
+
+def assign_consensus_period_by_majority(
+    periodicity_results: pd.DataFrame,
+    min_features: int = 5,
+    tolerance: int = 1,
+) -> pd.DataFrame:
+    """Assign consensus period based on majority vote across features.
+    
+    For each user, finds the period that the majority of features agree on
+    (within tolerance). Requires at least min_features to agree.
+    
+    Args:
+        periodicity_results: DataFrame with columns: user, feature, period, snr (or similar)
+        min_features: Minimum number of features required for consensus (default: 5)
+        tolerance: ±N days tolerance for "agreement" (default: 1)
+    
+    Returns:
+        DataFrame with columns: user, consensus_period, n_features_agreeing, consensus_pct
+    """
+    if len(periodicity_results) == 0:
+        return pd.DataFrame(columns=["user", "consensus_period", "n_features_agreeing", "consensus_pct"])
+    
+    # Required columns
+    required_cols = ["user", "feature", "period"]
+    missing_cols = [col for col in required_cols if col not in periodicity_results.columns]
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {missing_cols}")
+    
+    consensus_results = []
+    
+    for user in periodicity_results["user"].unique():
+        user_data = periodicity_results[periodicity_results["user"] == user].copy()
+        
+        # Filter out NaN periods
+        user_data = user_data[user_data["period"].notna()].copy()
+        
+        if len(user_data) < min_features:
+            continue  # Skip users with insufficient features
+        
+        periods = user_data["period"].values
+        
+        # Find the period that most features agree on (within tolerance)
+        best_period = None
+        best_count = 0
+        
+        # Try each unique period as a candidate
+        for candidate_period in np.unique(periods):
+            # Count how many features agree (within tolerance)
+            within_tolerance = np.sum(np.abs(periods - candidate_period) <= tolerance)
+            
+            if within_tolerance > best_count:
+                best_count = within_tolerance
+                best_period = candidate_period
+        
+        # Only assign consensus if enough features agree
+        if best_count >= min_features:
+            consensus_pct = (best_count / len(periods)) * 100
+            consensus_results.append({
+                "user": user,
+                "consensus_period": best_period,
+                "n_features_agreeing": best_count,
+                "consensus_pct": consensus_pct,
+            })
+    
+    if len(consensus_results) == 0:
+        return pd.DataFrame(columns=["user", "consensus_period", "n_features_agreeing", "consensus_pct"])
+    
+    consensus_df = pd.DataFrame(consensus_results)
+    return consensus_df.sort_values("user").reset_index(drop=True)
+
+
+def calculate_feature_phase_range(
+    phase_df: pd.DataFrame,
+    feature_cols: list[str] | None = None,
+    phase_col: str = "phase",
+) -> pd.DataFrame:
+    """Calculate (max - min) feature value across phases for each feature.
+    
+    This metric measures how much each feature varies across menstrual cycle phases.
+    Features with larger (max-min) differences are more likely to show cyclical patterns.
+    
+    Args:
+        phase_df: DataFrame with phase assignments and feature values
+            Should have columns: phase_col, and feature columns (or {feature}_zscore columns)
+        feature_cols: List of feature column names to analyze
+            If None, auto-detect feature columns (those ending in _zscore or _mean)
+        phase_col: Column name for phase assignments (default: "phase")
+    
+    Returns:
+        DataFrame with columns: feature, max_min_diff, max_phase, min_phase, mean_max, mean_min
+        Sorted by max_min_diff descending (largest phase differences first)
+    """
+    phase_df = phase_df.copy()
+    
+    # Auto-detect feature columns if not provided
+    if feature_cols is None:
+        # Look for columns ending in _zscore or _mean
+        all_cols = set(phase_df.columns)
+        exclude_cols = {phase_col, "user", "author", "offset_from_cd1", "day", "period"}
+        feature_cols = [
+            col for col in all_cols 
+            if col not in exclude_cols and (col.endswith("_zscore") or col.endswith("_mean"))
+        ]
+    
+    if len(feature_cols) == 0:
+        return pd.DataFrame(columns=["feature", "max_min_diff", "max_phase", "min_phase", "mean_max", "mean_min"])
+    
+    results = []
+    
+    for feature in feature_cols:
+        if feature not in phase_df.columns:
+            continue
+        
+        # Calculate mean value per phase for this feature
+        phase_means = phase_df.groupby(phase_col)[feature].mean()
+        
+        if len(phase_means) == 0:
+            continue
+        
+        # Find max and min phases
+        max_val = phase_means.max()
+        min_val = phase_means.min()
+        max_min_diff = max_val - min_val
+        
+        max_phase = phase_means.idxmax()
+        min_phase = phase_means.idxmin()
+        
+        results.append({
+            "feature": feature,
+            "max_min_diff": max_min_diff,
+            "max_phase": max_phase,
+            "min_phase": min_phase,
+            "mean_max": max_val,
+            "mean_min": min_val,
+        })
+    
+    if len(results) == 0:
+        return pd.DataFrame(columns=["feature", "max_min_diff", "max_phase", "min_phase", "mean_max", "mean_min"])
+    
+    result_df = pd.DataFrame(results)
+    return result_df.sort_values("max_min_diff", ascending=False).reset_index(drop=True)
+
+
+def analyze_signal_fading(
+    timeline_df: pd.DataFrame,
+    phase_df: pd.DataFrame,
+    feature_cols: list[str],
+    time_col: str = "offset_from_cd1",
+    user_col: str = "author",
+    months_bins: list[tuple[float, float]] | None = None,
+) -> pd.DataFrame:
+    """Analyze how (max-min) feature values reduce over time.
+    
+    For each feature, calculates (max - min) across phases, binned by months from anchor.
+    Shows how signal strength (phase difference) decreases as time from anchor increases,
+    which is expected due to cycle length shifts (~2 days per month).
+    
+    Args:
+        timeline_df: DataFrame with posts and time offsets
+        phase_df: DataFrame with phase assignments (columns: user, phase, feature values)
+        feature_cols: List of feature column names to analyze (should be zscore normalized)
+        time_col: Column name for time offset (default: "offset_from_cd1")
+        user_col: Column name for user identifier (default: "author")
+        months_bins: List of (start_month, end_month) tuples for binning (default: auto)
+    
+    Returns:
+        DataFrame with columns: feature, months_bin, max_min_diff, n_users, mean_max_min
+    """
+    if months_bins is None:
+        # Default bins: 0-1, 1-2, 2-3, 3-4, 4-5, 5-6 months
+        months_bins = [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 6)]
+    
+    # Convert time offsets to months from anchor (assuming anchor is at offset=0)
+    timeline_df = timeline_df.copy()
+    timeline_df["months_from_anchor"] = timeline_df[time_col] / AVG_DAYS_PER_MONTH
+    
+    # Assign months bin to each post
+    def assign_months_bin(months: float) -> str | None:
+        """Assign months bin label."""
+        for start, end in months_bins:
+            if start <= months < end:
+                return f"{start}-{end}"
+        return None
+    
+    timeline_df["months_bin"] = timeline_df["months_from_anchor"].apply(assign_months_bin)
+    
+    # For each feature, calculate (max - min) per phase, per months bin
+    fading_results = []
+    
+    for feature in feature_cols:
+        # Use zscore column if available, otherwise use mean
+        feature_col = f"{feature}_zscore" if f"{feature}_zscore" in phase_df.columns else f"{feature}_mean"
+        
+        if feature_col not in phase_df.columns:
+            continue
+        
+        # For each months bin, calculate phase statistics
+        for months_bin_label in [f"{start}-{end}" for start, end in months_bins]:
+            # Filter to posts in this months bin
+            bin_timeline = timeline_df[timeline_df["months_bin"] == months_bin_label].copy()
+            
+            if len(bin_timeline) == 0:
+                continue
+            
+            # Get users in this bin
+            users_in_bin = set(bin_timeline[user_col].unique())
+            
+            # For each user, calculate (max - min) across phases
+            user_max_mins = []
+            
+            for user in users_in_bin:
+                user_phase_data = phase_df[
+                    (phase_df[user_col] == user) & 
+                    (phase_df[feature_col].notna())
+                ].copy()
+                
+                if len(user_phase_data) == 0:
+                    continue
+                
+                # Calculate max and min across phases for this user
+                max_val = user_phase_data[feature_col].max()
+                min_val = user_phase_data[feature_col].min()
+                max_min_diff = max_val - min_val
+                
+                user_max_mins.append(max_min_diff)
+            
+            if len(user_max_mins) > 0:
+                fading_results.append({
+                    "feature": feature,
+                    "months_bin": months_bin_label,
+                    "max_min_diff": np.mean(user_max_mins),  # Mean across users
+                    "n_users": len(user_max_mins),
+                    "std_max_min": np.std(user_max_mins),
+                })
+    
+    if len(fading_results) == 0:
+        return pd.DataFrame(columns=["feature", "months_bin", "max_min_diff", "n_users", "std_max_min"])
+    
+    fading_df = pd.DataFrame(fading_results)
+    return fading_df.sort_values(["feature", "months_bin"]).reset_index(drop=True)
 

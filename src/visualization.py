@@ -11,7 +11,83 @@ from scipy.optimize import curve_fit
 from src.analysis import aggregate_by_day
 
 
-from src.analysis import create_adaptive_phases, assign_phase_to_day
+def create_adaptive_phases(cycle_length: float, split_luteal: bool = False) -> dict[str, tuple[int, int]]:
+    """Create phase definitions adapted to cycle length.
+    
+    Uses 0-indexed offsets where offset 0 = CD1 (first day of menstruation/anchor day).
+    Note: In medical convention, CD1 = Day 1, but we use 0-indexing for offsets.
+    
+    Biological fact: Cycle length variation comes primarily from FOLLICULAR phase.
+    - Menstrual phase: ~4 days (relatively fixed)
+    - Follicular phase: 7-15 days (VARIABLE - where cycle differences occur)
+    - Ovulation: ~3 days (relatively fixed)
+    - Luteal phase: ~14 days (relatively fixed, though can vary slightly)
+    
+    For 28-day cycle: M(0-3)=CD1-4, F(4-10)=CD5-11, O(11-13)=CD12-14, L(14-27)=CD15-28
+    For 32-day cycle: M(0-3)=CD1-4, F(4-14)=CD5-15, O(15-17)=CD16-18, L(18-31)=CD19-32
+    
+    Args:
+        cycle_length: Detected cycle length in days (24-35)
+        split_luteal: If True, split luteal phase into Early Luteal (7 days) and Late Luteal (7 days)
+    
+    Returns:
+        Dictionary of {phase_name: (start_day, end_day)} where days are 0-indexed offsets
+    """
+    menstrual_len = 4
+    ovulation_len = 3
+    luteal_len = 14
+    
+    follicular_len = cycle_length - menstrual_len - ovulation_len - luteal_len
+    follicular_len = max(3, follicular_len)
+    
+    menstrual_end = menstrual_len - 1
+    follicular_start = menstrual_len
+    follicular_end = follicular_start + follicular_len - 1
+    ovulation_start = follicular_end + 1
+    ovulation_end = ovulation_start + ovulation_len - 1
+    luteal_start = ovulation_end + 1
+    luteal_end = int(cycle_length - 1)
+    
+    phases = {
+        'Menstrual': (0, menstrual_end),
+        'Follicular': (follicular_start, follicular_end),
+        'Ovulation': (ovulation_start, ovulation_end),
+    }
+    
+    if split_luteal:
+        early_luteal_end = luteal_start + 6  # First 7 days (0-6 = 7 days)
+        late_luteal_start = early_luteal_end + 1
+        phases['Early Luteal'] = (luteal_start, early_luteal_end)
+        phases['Late Luteal'] = (late_luteal_start, luteal_end)
+    else:
+        phases['Luteal'] = (luteal_start, luteal_end)
+    
+    return phases
+
+
+def assign_phase_to_day(day: float, phase_definition: dict[str, tuple[int, int]]) -> str | None:
+    """Assign phase to a day based on phase definition.
+    
+    Handles negative days (before anchor) and days beyond cycle length (wrapping).
+    Works for both CD (offset_from_cd1) and DPO (dpo_days) patterns.
+    
+    Args:
+        day: Day value (offset_from_cd1 for CD patterns, dpo_days for DPO patterns)
+        phase_definition: Dictionary of {phase_name: (start_day, end_day)}
+    
+    Returns:
+        Phase name or None
+    """
+    cycle_length = max(end for _, end in phase_definition.values()) + 1
+    
+    # Wrap days using modulo (Python's % already handles negatives correctly)
+    day_normalized = day % cycle_length
+    
+    for phase_name, (start, end) in phase_definition.items():
+        if start <= day_normalized <= end:
+            return phase_name
+    
+    return None
 
 
 def fit_sine_wave(offsets: np.ndarray, values: np.ndarray, period: float) -> tuple[np.ndarray, dict]:
@@ -302,20 +378,62 @@ def aggregate_features_by_phase(
     print(f"  Processing {len(valid_users)} users with detected cycles...")
     
     # Pre-filter timeline to only valid users
-    timeline_filtered = timeline_df[timeline_df[user_col].isin(valid_users)].copy()
+    timeline_valid = timeline_df[timeline_df[user_col].isin(valid_users)].copy()
     
-    if len(timeline_filtered) == 0:
+    if len(timeline_valid) == 0:
         print(f"  ⚠ No timeline data for valid users")
         return pd.DataFrame()
     
-    # Merge cycle lengths into timeline
-    timeline_filtered = timeline_filtered.merge(
+    # Step 1: DAILY AGGREGATION on FULL timeline (for valid users)
+    # This removes within-user-day variance
+    print(f"  Step 1: Daily aggregation on full timeline (per user per day)...")
+    
+    agg_dict = {f: 'mean' for f in features if f in timeline_valid.columns}
+    if not agg_dict:
+        print(f"  ⚠ No valid features found in timeline")
+        return pd.DataFrame()
+    
+    daily_full = timeline_valid.groupby([user_col, time_col]).agg(agg_dict).reset_index()
+    print(f"    → {len(daily_full)} user-days from {daily_full[user_col].nunique()} users (full timeline)")
+    
+    # Step 2: Per-user normalization on FULL daily aggregates (if enabled)
+    # This ensures consistent baseline regardless of time window
+    if normalize:
+        print(f"  Step 2: Applying per-user normalization on full timeline daily aggregates...")
+        for feature in features:
+            if feature not in daily_full.columns:
+                continue
+            
+            # Full z-score normalization on FULL timeline
+            user_means = daily_full.groupby(user_col)[feature].transform('mean')
+            user_stds = daily_full.groupby(user_col)[feature].transform('std')
+            daily_full[f'{feature}_zscore'] = (daily_full[feature] - user_means) / (user_stds + 1e-10)
+            daily_full[f'{feature}_zscore'] = daily_full[f'{feature}_zscore'].replace([np.inf, -np.inf], np.nan)
+        
+        # Use z-score versions for analysis
+        features_to_analyze = [f'{f}_zscore' for f in features if f'{f}_zscore' in daily_full.columns]
+    else:
+        features_to_analyze = features
+    
+    # Step 3: Apply time window filter AFTER normalization (if specified)
+    if time_window is not None:
+        min_day, max_day = time_window
+        daily_agg = daily_full[
+            (daily_full[time_col] >= min_day) &
+            (daily_full[time_col] <= max_day)
+        ].copy()
+        print(f"  Filtered to {time_col} in [{min_day}, {max_day}]: {len(daily_agg)} user-days")
+    else:
+        daily_agg = daily_full.copy()
+    
+    # Step 4: Merge cycle lengths and assign phases
+    print(f"  Step 4: Assigning phases based on detected cycle lengths...")
+    daily_agg = daily_agg.merge(
         user_cycles.rename(columns={results_user_col: user_col}),
         on=user_col,
         how='left'
     )
     
-    # Vectorized phase assignment
     def assign_phase_vectorized(row):
         cycle_length = row['period']
         day = row[time_col]
@@ -324,70 +442,76 @@ def aggregate_features_by_phase(
         phase_definition = create_adaptive_phases(cycle_length)
         return assign_phase_to_day(day, phase_definition)
     
-    print(f"  Assigning phases to {len(timeline_filtered)} posts...")
-    timeline_filtered['phase'] = timeline_filtered.apply(assign_phase_vectorized, axis=1)
-    timeline_filtered = timeline_filtered[timeline_filtered['phase'].notna()].copy()
+    daily_agg['phase'] = daily_agg.apply(assign_phase_vectorized, axis=1)
+    daily_agg = daily_agg[daily_agg['phase'].notna()].copy()
     
-    if len(timeline_filtered) == 0:
-        print(f"  ⚠ No posts assigned to phases")
+    if len(daily_agg) == 0:
+        print(f"  ⚠ No user-days assigned to phases")
         return pd.DataFrame()
     
-    # Now aggregate by feature, user, and phase
+    print(f"    → {len(daily_agg)} user-days assigned to phases")
+    
+    # Step 4: Aggregate by phase from daily data
+    # First average per user per phase, then aggregate across users
+    # This gives equal weight to each user regardless of posting volume
+    print(f"  Step 4: Aggregating by phase (averaging per user per phase first)...")
     phase_results = []
     
-    for feature in features:
-        if feature not in timeline_filtered.columns:
+    for feature in features_to_analyze:
+        if feature not in daily_agg.columns:
             continue
         
-        feature_df = timeline_filtered[[user_col, time_col, 'phase', feature]].copy()
-        feature_df = feature_df[feature_df[feature].notna()].copy()
+        feature_data = daily_agg[[user_col, 'phase', feature]].copy()
+        feature_data = feature_data[feature_data[feature].notna()].copy()
         
-        if len(feature_df) == 0:
+        if len(feature_data) == 0:
             continue
         
-        # Aggregate by user, day, and phase first (avoid multiple posts per day bias)
-        daily_agg = feature_df.groupby([user_col, time_col, 'phase']).agg({
-            feature: 'mean'
-        }).reset_index()
+        # Step 4a: Average per user per phase (one value per user per phase)
+        # This removes within-user, within-phase variance
+        user_phase_means = feature_data.groupby([user_col, 'phase'])[feature].mean().reset_index()
+        # The column name after reset_index() is the feature name itself
         
-        # Then aggregate by user and phase
-        user_phase_agg = daily_agg.groupby([user_col, 'phase']).agg({
-            feature: ['mean', 'std', 'count']
-        }).reset_index()
+        # Step 4b: Aggregate across users (treating each user as one observation per phase)
+        phase_stats = user_phase_means.groupby('phase')[feature].agg(['mean', 'std', 'count']).reset_index()
+        phase_stats.columns = ['phase', 'mean', 'std', 'n_users']
         
-        user_phase_agg.columns = [user_col, 'phase', 'mean', 'std', 'n_days']
+        # Calculate SEM from user means (n = number of users)
+        phase_stats['sem'] = phase_stats['std'] / np.sqrt(phase_stats['n_users'])
         
-        for _, row in user_phase_agg.iterrows():
+        # Count user-days for reference (but SEM is computed from users, not user-days)
+        user_days_per_phase = feature_data.groupby('phase').size().reset_index()
+        user_days_per_phase.columns = ['phase', 'n_user_days']
+        phase_stats = phase_stats.merge(user_days_per_phase, on='phase')
+        
+        # Get original feature name (remove normalization suffix if present)
+        original_feature = feature.replace('_zscore', '').replace('_centered', '')
+        
+        for _, row in phase_stats.iterrows():
             phase_results.append({
-                'feature': feature,
+                'feature': original_feature,
                 'phase': row['phase'],
-                'user': row[user_col],
                 'mean': row['mean'],
-                'std': row['std'] if not pd.isna(row['std']) else 0.0,
-                'n_days': int(row['n_days']),
+                'std': row['std'],
+                'sem': row['sem'],
+                'n_user_days': int(row['n_user_days']),
+                'n_users': int(row['n_users']),
             })
     
     if len(phase_results) == 0:
         return pd.DataFrame()
     
-    phase_df = pd.DataFrame(phase_results)
+    result_df = pd.DataFrame(phase_results)
     
-    # Aggregate across users
-    aggregated = phase_df.groupby(['feature', 'phase']).agg({
-        'mean': ['mean', 'std'],
-        'n_days': 'sum',
-        'user': 'nunique'
-    }).reset_index()
-    
-    aggregated.columns = ['feature', 'phase', 'mean', 'std', 'n_days', 'n_users']
-    
-    return aggregated
+    print(f"  ✓ Aggregation complete")
+    return result_df
 
 
 def plot_phase_analysis(
     phase_df: pd.DataFrame,
     features: list[str],
     output_path: Path,
+    error_bar_type: str = 'sem',
 ) -> None:
     """Plot bar charts showing features across menstrual phases.
     
@@ -395,6 +519,10 @@ def plot_phase_analysis(
         phase_df: Aggregated phase DataFrame (from aggregate_features_by_phase)
         features: List of features to plot
         output_path: Path to save the plot
+        error_bar_type: Type of error bars to use:
+            - 'sem': Standard Error of the Mean (std / sqrt(n)) - shows precision of mean estimate
+            - 'std': Standard deviation - shows raw variability in the data
+            Default: 'sem'
     """
     if len(phase_df) == 0:
         print(f"  ⚠ No phase data to visualize")
@@ -412,8 +540,10 @@ def plot_phase_analysis(
     n_cols = min(4, n_features)
     n_rows = (n_features + n_cols - 1) // n_cols
     
+    error_label = 'SEM' if error_bar_type == 'sem' else 'Std Dev'
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows))
-    fig.suptitle("Feature Values by Menstrual Phase", fontsize=16, fontweight='bold')
+    fig.suptitle(f"Feature Values by Menstrual Phase (Error bars = {error_label})", 
+                 fontsize=16, fontweight='bold')
     
     if n_features == 1:
         axes = [axes]
@@ -432,37 +562,42 @@ def plot_phase_analysis(
             continue
         
         means = []
-        stds = []
-        n_users_list = []
+        errors = []
+        n_user_days_list = []
         colors_list = []
         
         for phase in phase_order:
             phase_row = feature_data[feature_data['phase'] == phase]
             if len(phase_row) > 0:
                 means.append(phase_row.iloc[0]['mean'])
-                stds.append(phase_row.iloc[0]['std'])
-                n_users_list.append(int(phase_row.iloc[0]['n_users']))
+                # Choose error bar type
+                if error_bar_type == 'std':
+                    errors.append(phase_row.iloc[0]['std'])
+                else:  # default to sem
+                    errors.append(phase_row.iloc[0]['sem'])
+                n_user_days_list.append(int(phase_row.iloc[0]['n_user_days']))
                 colors_list.append(phase_colors[phase])
             else:
                 means.append(0)
-                stds.append(0)
-                n_users_list.append(0)
+                errors.append(0)
+                n_user_days_list.append(0)
                 colors_list.append('#cccccc')
         
         x = np.arange(len(phase_order))
-        bars = ax.bar(x, means, yerr=stds, capsize=5, color=colors_list, 
+        bars = ax.bar(x, means, yerr=errors, capsize=5, color=colors_list, 
                      alpha=0.7, edgecolor='black', linewidth=1.5)
         
-        # Add n_users labels
-        for bar, n in zip(bars, n_users_list):
+        # Add n_user_days labels
+        for bar, n in zip(bars, n_user_days_list):
             height = bar.get_height()
             ax.text(bar.get_x() + bar.get_width() / 2., height,
                    f'n={n}', ha='center', va='bottom', fontsize=8)
         
         ax.set_xticks(x)
         ax.set_xticklabels(phase_order, rotation=45, ha='right')
-        ax.set_ylabel('Mean Value')
+        ax.set_ylabel('Mean Value (Normalized)')
         ax.set_title(feature.replace('_', ' ').title(), fontweight='bold')
+        ax.axhline(0, color='black', linestyle='--', linewidth=0.5, alpha=0.5)
         ax.grid(axis='y', alpha=0.3, linestyle='--')
         ax.set_axisbelow(True)
     

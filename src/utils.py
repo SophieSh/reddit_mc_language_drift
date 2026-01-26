@@ -5,6 +5,24 @@ from pathlib import Path
 from src.io import find_latest_file, parse_jsonl_file
 
 
+def identify_feature_columns(df: pd.DataFrame, cfg: dict) -> list[str]:
+    """Identify feature columns (exclude metadata columns).
+    
+    Args:
+        df: DataFrame with posts and features
+        cfg: Configuration dictionary
+        
+    Returns:
+        List of feature column names
+    """
+    metadata_cols = set(cfg.get("reddit_metadata_columns", []))
+    
+    all_cols = set(df.columns)
+    feature_cols = [col for col in all_cols if col not in metadata_cols]
+    
+    return feature_cols
+
+
 def load_latest_preprocessed_file(interim_dir: Path, pattern: str) -> pd.DataFrame | None:
     """Load the most recent preprocessed file matching the pattern.
     

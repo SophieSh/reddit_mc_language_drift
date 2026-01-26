@@ -3,9 +3,7 @@ import pandas as pd
 from pathlib import Path
 from datetime import datetime
 
-
-# Constants
-AVG_DAYS_PER_MONTH = 30.5
+from src.config import AVG_DAYS_PER_MONTH
 
 
 # /////////////////////////////////////////////////////////////////////////////
@@ -15,6 +13,44 @@ AVG_DAYS_PER_MONTH = 30.5
 def filter_deleted_authors(df: pd.DataFrame) -> pd.DataFrame:
     """Remove rows where author is [deleted]."""
     return df[df['author'] != '[deleted]'].copy()
+
+
+def filter_users_with_nan_features(
+    df: pd.DataFrame,
+    feature_cols: list[str],
+    user_col: str = "author"
+) -> tuple[pd.DataFrame, list[str]]:
+    """Remove users who have ANY NaN in ANY feature column.
+    
+    Args:
+        df: DataFrame with posts and feature columns
+        feature_cols: List of feature column names to check
+        user_col: Column name for user identifier (default: "author")
+    
+    Returns:
+        Tuple of (filtered_df, removed_users_list)
+    """
+    df = df.copy()
+    
+    # Check which users have any NaN in any feature column
+    users_with_nan = set()
+    
+    for feature in feature_cols:
+        if feature not in df.columns:
+            continue
+        
+        # Find users with NaN in this feature
+        nan_mask = df[feature].isna()
+        users_with_nan_in_feature = set(df[nan_mask][user_col].unique())
+        users_with_nan.update(users_with_nan_in_feature)
+    
+    # Filter out users with any NaN
+    valid_users = set(df[user_col].unique()) - users_with_nan
+    filtered_df = df[df[user_col].isin(valid_users)].copy()
+    
+    removed_users = sorted(list(users_with_nan))
+    
+    return filtered_df, removed_users
 
 
 def concatenate_title_selftext_text(title: str | None, selftext: str | None) -> str:
