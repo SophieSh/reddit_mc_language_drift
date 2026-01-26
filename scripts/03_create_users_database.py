@@ -14,7 +14,7 @@ Creates two separate files:
 from __future__ import annotations
 
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -184,7 +184,7 @@ def main() -> None:
     print("=" * 60)
 
     result_1_6_9, result_dpo = create_users_database(interim_dir)
-    timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
 
     if len(result_1_6_9) > 0:
         output_path_1_6_9 = output_dir / f"users_database_CD_{timestamp}.csv"
