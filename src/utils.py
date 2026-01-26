@@ -6,19 +6,31 @@ from src.io import find_latest_file, parse_jsonl_file
 
 
 def identify_feature_columns(df: pd.DataFrame, cfg: dict) -> list[str]:
-    """Identify feature columns (exclude metadata columns).
+    """Identify feature columns (exclude metadata columns and non-numeric columns).
     
     Args:
         df: DataFrame with posts and features
         cfg: Configuration dictionary
         
     Returns:
-        List of feature column names
+        List of numeric feature column names
     """
     metadata_cols = set(cfg.get("reddit_metadata_columns", []))
     
+    # Also exclude common non-feature columns that might not be in metadata list
+    additional_exclude = {
+        'offset_from_cd1', 'ts_utc', 'ts_date', 'id', 'source', 'source_cut',
+        'created_utc', 'permalink', 'author'
+    }
+    
     all_cols = set(df.columns)
-    feature_cols = [col for col in all_cols if col not in metadata_cols]
+    # Filter: exclude metadata columns, additional exclude columns, and non-numeric columns
+    feature_cols = [
+        col for col in all_cols 
+        if col not in metadata_cols 
+        and col not in additional_exclude
+        and pd.api.types.is_numeric_dtype(df[col])
+    ]
     
     return feature_cols
 

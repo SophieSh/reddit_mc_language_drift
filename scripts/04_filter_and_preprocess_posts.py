@@ -182,7 +182,7 @@ def main(
     
     # Add timestamps
     if 'created_utc' in posts_df.columns:
-        posts_df = add_timestamp_columns(posts_df, timestamp_col='created_utc')
+        posts_df = add_timestamp_columns(posts_df, utc_col='created_utc')
     
     # Filter by minimum characters
     before = len(posts_df)

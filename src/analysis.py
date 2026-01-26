@@ -15,21 +15,30 @@ from src.config import (
 )
 
 
-def normalize_values(values: np.ndarray, method: str = "zscore") -> np.ndarray:
+
+def normalize_values(
+    values: np.ndarray, 
+    method: str = "zscore",
+    epsilon: float = EPSILON,
+) -> np.ndarray:
     """Normalize values using specified method.
     
     Args:
         values: Array of values to normalize
         method: Normalization method ("zscore", "minmax", or "none")
+        epsilon: Small epsilon for numerical stability (default: 1e-10)
         
     Returns:
         Normalized array
     """
+    # Ensure epsilon is float64 for numpy operations
+    epsilon_val = np.float64(epsilon)
+    
     if method == "zscore":
-        return (values - np.mean(values)) / (np.std(values) + EPSILON)
+        return (values - np.mean(values)) / (np.std(values) + epsilon_val)
     elif method == "minmax":
         v_min, v_max = np.min(values), np.max(values)
-        return (values - v_min) / (v_max - v_min + EPSILON)
+        return (values - v_min) / (v_max - v_min + epsilon_val)
     elif method == "none":
         return values
     else:
@@ -40,17 +49,19 @@ def validate_timeline_data(
     offsets: np.ndarray,
     values: np.ndarray,
     min_points: int = MIN_DATA_POINTS,
-    min_unique_days: int = MIN_DATA_POINTS,
-    min_span_days: int = DEFAULT_PERIOD_MIN,
+    min_unique_days: int = 10,
+    min_span_days: int = 21,
+    epsilon: float = EPSILON,
 ) -> tuple[bool, str | None]:
     """Validate timeline data quality.
     
     Args:
         offsets: Time offsets (days from CD1)
-        values: Feature values at each offset
-        min_points: Minimum number of data points required
-        min_unique_days: Minimum number of unique days required
-        min_span_days: Minimum time span required (days)
+        values: Feature values at each offset (should be numeric)
+        min_points: Minimum number of data points required (default: 10)
+        min_unique_days: Minimum number of unique days required (default: 10)
+        min_span_days: Minimum time span required (days, default: 24)
+        epsilon: Small epsilon for numerical stability (default: 1e-10)
         
     Returns:
         Tuple of (is_valid, error_message). If valid, error_message is None.
@@ -65,7 +76,27 @@ def validate_timeline_data(
     if span < min_span_days:
         return False, f"Time span too short: {span} < {min_span_days} days"
     
-    if np.std(values) < EPSILON:
+    # Ensure values are numeric (convert if needed to handle dtype issues)
+    # This handles cases where values come from pandas DataFrame with object dtype
+    if not np.issubdtype(values.dtype, np.number):
+        # Convert object/string array to numeric
+        values = pd.to_numeric(values, errors='coerce')
+        values = np.asarray(values, dtype=np.float64)
+    else:
+        # Ensure it's float64 for consistency
+        values = np.asarray(values, dtype=np.float64)
+    
+    # Filter out NaN values before checking std
+    valid_values = values[~np.isnan(values)]
+    if len(valid_values) == 0:
+        return False, "All values are NaN"
+    
+    if len(valid_values) < 2:
+        return False, "Insufficient valid values for std calculation"
+    
+    # Ensure epsilon is float64 for comparison
+    epsilon_val = np.float64(epsilon)
+    if np.std(valid_values) < epsilon_val:
         return False, "Constant values (no variation)"
     
     return True, None
@@ -160,13 +191,46 @@ def aggregate_all_features_by_day(
     
     print(f"Aggregating {len(feature_cols)} features by (user, day)...")
     
+    # Filter feature columns to only those that exist, are not grouping columns, and are numeric
+    valid_feature_cols = []
+    for f in feature_cols:
+        if f not in df.columns:
+            continue
+        if f in [user_col, time_col]:
+            continue
+        # Only include numeric columns (can be aggregated with mean)
+        if pd.api.types.is_numeric_dtype(df[f]):
+            valid_feature_cols.append(f)
+    
+    if len(valid_feature_cols) == 0:
+        raise ValueError(
+            f"No numeric feature columns found in DataFrame. "
+            f"Available columns: {df.columns.tolist()}\n"
+            f"Feature columns passed: {feature_cols[:10]}..."
+        )
+    
+    # Select only columns we need: grouping columns + feature columns
+    # This avoids trying to aggregate non-numeric columns like timestamps, text, etc.
+    cols_to_keep = [user_col, time_col] + valid_feature_cols
+    
+    # Remove duplicates (in case grouping columns were in feature_cols)
+    cols_to_keep = list(dict.fromkeys(cols_to_keep))  # Preserves order while removing duplicates
+    
+    df_subset = df[cols_to_keep].copy()
+    
     # Group by user and time, compute mean for each feature
-    agg_dict = {feature: "mean" for feature in feature_cols if feature in df.columns}
+    agg_dict = {feature: "mean" for feature in valid_feature_cols}
     
     if len(agg_dict) == 0:
         raise ValueError(f"None of the feature columns found in DataFrame. Available columns: {df.columns.tolist()}")
     
-    daily_agg = df.groupby([user_col, time_col]).agg(agg_dict).reset_index()
+    daily_agg = df_subset.groupby([user_col, time_col]).agg(agg_dict).reset_index()
+    
+    # Ensure all aggregated columns are numeric (defensive check)
+    for col in daily_agg.columns:
+        if col not in [user_col, time_col] and not pd.api.types.is_numeric_dtype(daily_agg[col]):
+            print(f"  Warning: Aggregated column {col} is not numeric (dtype: {daily_agg[col].dtype}), converting...")
+            daily_agg[col] = pd.to_numeric(daily_agg[col], errors='coerce')
     
     # Rename feature columns to {feature}_mean
     rename_dict = {}
@@ -212,18 +276,53 @@ def normalize_features_per_user_zscore(
             print(f"  Warning: {mean_col} not found, skipping")
             continue
         
+        # Ensure column is numeric (convert if needed)
+        original_dtype = df[mean_col].dtype
+        if not pd.api.types.is_numeric_dtype(df[mean_col]):
+            print(f"  Warning: {mean_col} is not numeric (dtype: {original_dtype}), converting...")
+            df[mean_col] = pd.to_numeric(df[mean_col], errors='coerce')
+        
         zscore_col = mean_col.replace("_mean", "_zscore")
         
         # Vectorized per-user normalization using groupby.transform
         user_means = df.groupby(user_col)[mean_col].transform('mean')
         user_stds = df.groupby(user_col)[mean_col].transform('std')
         
-        # Calculate z-score, handling constant values (std=0) by setting to NaN
-        df[zscore_col] = (df[mean_col] - user_means) / (user_stds + EPSILON)
-        df[zscore_col] = df[zscore_col].replace([np.inf, -np.inf], np.nan)
+        # Debug: Check dtypes before conversion
+        if user_stds.dtype == 'object' or str(user_stds.dtype).startswith('<U'):
+            print(f"  ERROR: {mean_col} -> user_stds has dtype {user_stds.dtype}, converting...")
+            print(f"    Sample values: {user_stds.head(5).tolist()}")
+            print(f"    mean_col dtype: {df[mean_col].dtype}")
+        
+        # Ensure both are numeric Series (defensive check) - convert BEFORE arithmetic
+        # Convert to numpy arrays with explicit float64 dtype to avoid pandas dtype issues
+        # Use np.float64 explicitly to ensure proper conversion even if Series has object dtype
+        user_means_series = pd.to_numeric(user_means, errors='coerce')
+        user_stds_series = pd.to_numeric(user_stds, errors='coerce')
+        mean_col_series = pd.to_numeric(df[mean_col], errors='coerce')
+        
+        # Convert to numpy arrays with explicit float64 dtype
+        user_means_arr = np.asarray(user_means_series, dtype=np.float64)
+        user_stds_arr = np.asarray(user_stds_series, dtype=np.float64)
+        mean_col_arr = np.asarray(mean_col_series, dtype=np.float64)
+        
+        # Ensure EPSILON is float64 for the arithmetic operation
+        epsilon_val = np.float64(EPSILON)
+        
+        # Calculate z-score using numpy arrays (handles dtype issues)
+        # Match old behavior: z = (x - μ) / (σ + ε) where ε is small epsilon
+        # This matches the original implementation that worked correctly
+        with np.errstate(divide='ignore', invalid='ignore'):
+            # Old formula: (x - μ) / (σ + ε) - matches original working code
+            zscore_arr = (mean_col_arr - user_means_arr) / (user_stds_arr + epsilon_val)
+            # Replace non-finite values (inf, -inf, nan) with NaN
+            zscore_arr = np.where(np.isfinite(zscore_arr), zscore_arr, np.nan)
+        
+        df[zscore_col] = zscore_arr
         
         # Set to NaN where std was effectively zero (constant values)
-        df.loc[user_stds < EPSILON, zscore_col] = np.nan
+        # This handles cases where user has constant values (std ≈ 0)
+        df.loc[user_stds_series < epsilon_val, zscore_col] = np.nan
         
         valid_count = df[zscore_col].notna().sum()
         print(f"  ✓ {mean_col} → {zscore_col}: {valid_count} valid values")
@@ -265,9 +364,16 @@ def run_lombscargle(
     power_without_peak = np.concatenate([power[:best_idx], power[best_idx+1:]])
     if len(power_without_peak) > 0:
         median_power_background = np.median(power_without_peak)
-        peak_to_background = best_power / (median_power_background + EPSILON)
+        # Avoid division by extremely small values that produce huge SNR
+        # Cap SNR at reasonable maximum (1000) to prevent extreme outliers
+        if median_power_background < EPSILON:
+            peak_to_background = min(best_power / EPSILON, 1000.0)
+        else:
+            peak_to_background = best_power / (median_power_background + EPSILON)
     else:
-        peak_to_background = best_power / EPSILON
+        # Only one period in range - cannot compute meaningful SNR
+        # Cap at reasonable value to avoid extreme outliers
+        peak_to_background = min(best_power / EPSILON, 1000.0)
     
     return {
         "best_period": best_period,
@@ -353,6 +459,130 @@ def run_fft_interpolation(
     }
 
 
+def run_fft_interpolation_integer_periods(
+    offsets: np.ndarray,
+    values: np.ndarray,
+    period_min: float = DEFAULT_PERIOD_MIN,
+    period_max: float = DEFAULT_PERIOD_MAX,
+) -> dict:
+    """Run FFT on interpolated data, then evaluate power at exact integer periods.
+    
+    Similar to run_fft_interpolation, but instead of rounding FFT periods,
+    interpolates power at exact integer periods [24, 25, 26, ..., 35].
+    This is more biologically appropriate (cycles are integer days) and
+    more accurate (no rounding error).
+    
+    Args:
+        offsets: Time offsets (days from CD1)
+        values: Feature values at each offset (should be pre-normalized per user)
+        period_min: Minimum period to search (days)
+        period_max: Maximum period to search (days)
+        
+    Returns:
+        dict with best_period, best_power, peak_to_background, periods, powers
+        periods and powers are at exact integer periods
+    """
+    if len(offsets) < 2:
+        return {
+            "best_period": None,
+            "best_power": 0.0,
+            "peak_to_background": 0.0,
+            "periods": np.array([]),
+            "powers": np.array([]),
+        }
+    
+    # Step 1: Same as run_fft_interpolation - get FFT spectrum
+    offset_min = int(np.floor(offsets.min()))
+    offset_max = int(np.ceil(offsets.max()))
+    regular_offsets = np.arange(offset_min, offset_max + 1)
+    regular_values = np.interp(regular_offsets, offsets, values)
+    regular_values = regular_values - np.mean(regular_values)
+    
+    n = len(regular_values)
+    fft_vals = fft(regular_values)
+    freqs = fftfreq(n, d=1.0)
+    
+    positive_freqs = freqs[: n // 2]
+    periods_fft = 1.0 / positive_freqs[1:]  # All FFT periods
+    powers_fft = np.abs(fft_vals[: n // 2])[1:] ** 2  # All FFT powers
+    
+    # Step 2: Create integer periods in range [period_min, period_max]
+    period_min_int = int(np.ceil(period_min))
+    period_max_int = int(np.floor(period_max))
+    integer_periods = np.arange(period_min_int, period_max_int + 1, dtype=int)
+    
+    if len(integer_periods) == 0:
+        return {
+            "best_period": None,
+            "best_power": 0.0,
+            "peak_to_background": 0.0,
+            "periods": np.array([]),
+            "powers": np.array([]),
+        }
+    
+    # Step 3: Interpolate power at exact integer periods
+    # Need to handle edge case: periods_fft must be sorted for interpolation
+    # Also need to handle case where integer period is outside FFT range
+    sort_idx = np.argsort(periods_fft)
+    periods_fft_sorted = periods_fft[sort_idx]
+    powers_fft_sorted = powers_fft[sort_idx]
+    
+    # Filter to periods that are within reasonable range for interpolation
+    # (interpolate only if integer period is within or near FFT range)
+    valid_mask = (
+        (integer_periods >= periods_fft_sorted.min()) & 
+        (integer_periods <= periods_fft_sorted.max())
+    )
+    integer_periods_valid = integer_periods[valid_mask]
+    
+    if len(integer_periods_valid) == 0:
+        return {
+            "best_period": None,
+            "best_power": 0.0,
+            "peak_to_background": 0.0,
+            "periods": np.array([]),
+            "powers": np.array([]),
+        }
+    
+    # Interpolate power at integer periods
+    powers_at_integers = np.interp(
+        integer_periods_valid,
+        periods_fft_sorted,
+        powers_fft_sorted
+    )
+    
+    # Step 4: Find maximum among integer periods
+    best_idx = np.argmax(powers_at_integers)
+    best_period = int(integer_periods_valid[best_idx])  # Already an integer!
+    best_power = powers_at_integers[best_idx]
+    
+    # Step 5: Calculate SNR (peak-to-background)
+    powers_without_peak = np.concatenate([
+        powers_at_integers[:best_idx],
+        powers_at_integers[best_idx+1:]
+    ])
+    if len(powers_without_peak) > 0:
+        median_power_background = np.median(powers_without_peak)
+        # Avoid division by extremely small values that produce huge SNR
+        # Cap SNR at reasonable maximum (1000) to prevent extreme outliers
+        if median_power_background < EPSILON:
+            peak_to_background = min(best_power / EPSILON, 1000.0)
+        else:
+            peak_to_background = best_power / (median_power_background + EPSILON)
+    else:
+        # Only one period in range - cannot compute meaningful SNR
+        # Cap at reasonable value to avoid extreme outliers
+        peak_to_background = min(best_power / EPSILON, 1000.0)
+    
+    return {
+        "best_period": best_period,
+        "best_power": best_power,
+        "peak_to_background": peak_to_background,
+        "periods": integer_periods_valid.astype(int),
+        "powers": powers_at_integers,
+    }
+
+
 def run_fft_zeropad(
     offsets: np.ndarray,
     values: np.ndarray,
@@ -419,9 +649,16 @@ def run_fft_zeropad(
     powers_without_peak = np.concatenate([powers_filtered[:best_idx], powers_filtered[best_idx+1:]])
     if len(powers_without_peak) > 0:
         median_power_background = np.median(powers_without_peak)
-        peak_to_background = best_power / (median_power_background + EPSILON)
+        # Avoid division by extremely small values that produce huge SNR
+        # Cap SNR at reasonable maximum (1000) to prevent extreme outliers
+        if median_power_background < EPSILON:
+            peak_to_background = min(best_power / EPSILON, 1000.0)
+        else:
+            peak_to_background = best_power / (median_power_background + EPSILON)
     else:
-        peak_to_background = best_power / EPSILON
+        # Only one period in range - cannot compute meaningful SNR
+        # Cap at reasonable value to avoid extreme outliers
+        peak_to_background = min(best_power / EPSILON, 1000.0)
     
     return {
         "best_period": best_period,
@@ -437,23 +674,34 @@ def analyze_user_timeline(
     feature_col: str = "text",
     period_min: float = DEFAULT_PERIOD_MIN,
     period_max: float = DEFAULT_PERIOD_MAX,
+    period_wide_min: float = 10.0,
+    period_wide_max: float = 50.0,
     normalize_method: str = "zscore",
+    methods: list[str] | None = None,
 ) -> dict | None:
-    """Analyze a single user's timeline with LS and two FFT variants.
+    """Analyze a single user's timeline with configurable periodicity detection methods.
+    
+    Available methods:
+    - lomb_scargle: Astropy LS with FAP (searches 10-90 days)
+    - fft_interpolation: FFT with linear interpolation (searches 24-35 days)
+    - fft_zeropad: FFT with zero-padding (searches 24-35 days)
+    - fft_interpolation_wide: FFT interpolation wide search (configurable range)
+    - fft_zeropad_wide: FFT zero-pad wide search (configurable range)
     
     Args:
         user_timeline: DataFrame with columns including 'offset_from_cd1' and feature_col
         feature_col: Column name for feature values (default: 'text' uses text length)
-        period_min: Minimum period to search (days, default 24)
-        period_max: Maximum period to search (days, default 35)
+        period_min: Minimum period for biological relevance (days, default 24)
+        period_max: Maximum period for biological relevance (days, default 35)
+        period_wide_min: Minimum period for wide FFT search (days, default 10)
+        period_wide_max: Maximum period for wide FFT search (days, default 50)
         normalize_method: Method to normalize feature values ("zscore", "minmax", or "none")
+        methods: List of method names to run (default: all methods)
         
     Returns:
         dict with analysis results including:
         - n_points, span_days: Data quality metrics
-        - ls_period, ls_power, ls_peak_to_background: Lomb-Scargle results
-        - fft_interp_period, fft_interp_power, fft_interp_peak_to_background: FFT interpolation
-        - fft_zeropad_period, fft_zeropad_power, fft_zeropad_peak_to_background: FFT zero-padding
+        - method-specific fields (e.g., ls_period, fft_interp_period, etc.)
         Returns None if insufficient data
     """
     if not isinstance(user_timeline, pd.DataFrame):
@@ -471,10 +719,13 @@ def analyze_user_timeline(
     else:
         user_timeline["_feature_value"] = user_timeline[feature_col]
     
+    # Determine which time column to use (dpo_days for DPO patterns, offset_from_cd1 for CD patterns)
+    time_col = "dpo_days" if "dpo_days" in user_timeline.columns and user_timeline["dpo_days"].notna().any() else "offset_from_cd1"
+    
     # Aggregate by day
     daily_agg = aggregate_by_day(
         user_timeline,
-        offset_col="offset_from_cd1",
+        offset_col=time_col,
         value_col="_feature_value",
         agg_func="mean"
     )
@@ -486,7 +737,9 @@ def analyze_user_timeline(
     if daily_agg["feature_mean"].nunique() == 1:
         return None  # Constant values, no signal
     
-    offsets = daily_agg["offset_from_cd1"].values
+    # Get the time column name from daily_agg (should match time_col used above)
+    time_col_name = "dpo_days" if "dpo_days" in daily_agg.columns else "offset_from_cd1"
+    offsets = daily_agg[time_col_name].values
     values = daily_agg["feature_mean"].values
     
     # Normalize feature values per user to make amplitudes comparable
@@ -497,25 +750,276 @@ def analyze_user_timeline(
     if not is_valid:
         return None
     
-    # Run all three methods
-    ls_result = run_lombscargle(offsets, values_norm, period_min, period_max)
-    fft_interp_result = run_fft_interpolation(offsets, values_norm, period_min, period_max)
-    fft_zeropad_result = run_fft_zeropad(offsets, values_norm, period_min, period_max)
+    # Default to fft_interpolation if not specified (matches old version's behavior when only fft_interpolation is used)
+    if methods is None:
+        methods = ["fft_interpolation"]
     
+    # Base result dict
     span_days = float(offsets.max() - offsets.min())
-    
-    return {
+    result = {
         "n_points": len(offsets),
         "span_days": span_days,
-        "ls_period": ls_result["best_period"],
-        "ls_power": ls_result["best_power"],
-        "ls_peak_to_background": ls_result["peak_to_background"],
-        "fft_interp_period": fft_interp_result["best_period"],
-        "fft_interp_power": fft_interp_result["best_power"],
-        "fft_interp_peak_to_background": fft_interp_result["peak_to_background"],
-        "fft_zeropad_period": fft_zeropad_result["best_period"],
-        "fft_zeropad_power": fft_zeropad_result["best_power"],
-        "fft_zeropad_peak_to_background": fft_zeropad_result["peak_to_background"],
+    }
+    
+    # Run only specified methods
+    if "lomb_scargle" in methods:
+        # Only run if astropy is available
+        try:
+            from astropy.timeseries import LombScargle
+            ls_result = run_lombscargle_astropy(offsets, values_norm, period_search_min=10.0, period_search_max=90.0)
+            result.update({
+                "ls_period": ls_result["best_period"],
+                "ls_power": ls_result["best_power"],
+                "ls_fap": ls_result["fap"],
+            })
+        except ImportError:
+            pass
+    
+    if "fft_interpolation" in methods:
+        fft_interp_result = run_fft_interpolation(offsets, values_norm, period_min, period_max)
+        result.update({
+            "fft_interp_period": fft_interp_result["best_period"],
+            "fft_interp_power": fft_interp_result["best_power"],
+            "fft_interp_peak_to_background": fft_interp_result["peak_to_background"],
+        })
+    
+    if "fft_zeropad" in methods:
+        fft_zeropad_result = run_fft_zeropad(offsets, values_norm, period_min, period_max)
+        result.update({
+            "fft_zeropad_period": fft_zeropad_result["best_period"],
+            "fft_zeropad_power": fft_zeropad_result["best_power"],
+            "fft_zeropad_peak_to_background": fft_zeropad_result["peak_to_background"],
+        })
+    
+    if "fft_interpolation_wide" in methods:
+        fft_interp_wide_result = run_fft_interpolation_wide(
+            offsets, values_norm, 
+            period_search_min=period_wide_min, 
+            period_search_max=period_wide_max
+        )
+        result.update({
+            "fft_interp_wide_period": fft_interp_wide_result["best_period"],
+            "fft_interp_wide_power": fft_interp_wide_result["best_power"],
+            "fft_interp_wide_peak_to_background": fft_interp_wide_result["peak_to_background"],
+        })
+    
+    if "fft_zeropad_wide" in methods:
+        fft_zeropad_wide_result = run_fft_zeropad_wide(offsets, values_norm, period_search_min=period_wide_min, period_search_max=period_wide_max)
+        result.update({
+            "fft_zeropad_wide_period": fft_zeropad_wide_result["best_period"],
+            "fft_zeropad_wide_power": fft_zeropad_wide_result["best_power"],
+            "fft_zeropad_wide_peak_to_background": fft_zeropad_wide_result["peak_to_background"],
+        })
+    
+    return result
+
+
+def run_lombscargle_astropy(
+    offsets: np.ndarray,
+    values: np.ndarray,
+    period_search_min: float = 10.0,
+    period_search_max: float = 90.0,
+    period_resolution: float = 0.1,
+) -> dict:
+    """Run Lomb-Scargle periodogram using astropy (with FAP and proper detrending).
+    
+    This is the improved version that searches a wider range and calculates
+    False Alarm Probability. Post-filter results to 24-35 days after getting them.
+    
+    Args:
+        offsets: Time offsets (days from CD1)
+        values: Feature values at each offset (should be pre-normalized per user)
+        period_search_min: Minimum period to search (days, default 10)
+        period_search_max: Maximum period to search (days, default 90)
+        period_resolution: Resolution for period search (days, default 0.1)
+        
+    Returns:
+        dict with:
+            - best_period: detected period (days)
+            - best_power: power at best period
+            - fap: False Alarm Probability (lower = more significant)
+            - periods: array of periods tested
+            - powers: array of power values
+    """
+    try:
+        from astropy.timeseries import LombScargle
+    except ImportError:
+        # Fallback if astropy not available
+        return {
+            "best_period": None,
+            "best_power": 0.0,
+            "fap": 1.0,
+            "periods": np.array([]),
+            "powers": np.array([]),
+        }
+    
+    # Astropy's LombScargle handles mean-centering internally
+    ls = LombScargle(offsets, values, center_data=True, fit_mean=True)
+    
+    # Create frequency grid (astropy uses frequency, not period)
+    periods = np.arange(period_search_min, period_search_max + period_resolution, period_resolution)
+    frequencies = 1.0 / periods
+    
+    # Calculate power
+    power = ls.power(frequencies)
+    
+    # Find best period
+    best_idx = np.argmax(power)
+    best_period = periods[best_idx]
+    best_power = power[best_idx]
+    
+    # Calculate False Alarm Probability for the best peak
+    # This tells us: "What's the probability this peak is just noise?"
+    fap = ls.false_alarm_probability(best_power)
+    
+    return {
+        "best_period": best_period,
+        "best_power": best_power,
+        "fap": fap,
+        "periods": periods,
+        "powers": power,
+    }
+
+
+def run_fft_interpolation_wide(
+    offsets: np.ndarray,
+    values: np.ndarray,
+    period_search_min: float = 10.0,
+    period_search_max: float = 50.0,
+) -> dict:
+    """Run FFT on interpolated data with WIDE search window (configurable range).
+    
+    Apply "widen and filter" strategy: search broadly, filter to 24-35 in post-processing.
+    
+    Args:
+        offsets: Time offsets (days from CD1)
+        values: Feature values at each offset (should be pre-normalized per user)
+        period_search_min: Minimum period to search (days, default 10)
+        period_search_max: Maximum period to search (days, default 50)
+        
+    Returns:
+        dict with best_period, best_power, peak_to_background (best in 10-50 range)
+    """
+    if len(offsets) < 2:
+        return {
+            "best_period": None,
+            "best_power": 0.0,
+            "peak_to_background": 0.0,
+        }
+    
+    offset_min = int(np.floor(offsets.min()))
+    offset_max = int(np.ceil(offsets.max()))
+    regular_offsets = np.arange(offset_min, offset_max + 1)
+    regular_values = np.interp(regular_offsets, offsets, values)
+    regular_values = regular_values - np.mean(regular_values)
+    
+    n = len(regular_values)
+    fft_vals = fft(regular_values)
+    freqs = fftfreq(n, d=1.0)
+    
+    positive_freqs = freqs[: n // 2]
+    periods = 1.0 / positive_freqs[1:]
+    powers = np.abs(fft_vals[: n // 2])[1:] ** 2
+    
+    mask = (periods >= period_search_min) & (periods <= period_search_max)
+    periods_filtered = periods[mask]
+    powers_filtered = powers[mask]
+    
+    if len(powers_filtered) == 0:
+        return {
+            "best_period": None,
+            "best_power": 0.0,
+            "peak_to_background": 0.0,
+        }
+    
+    best_idx = np.argmax(powers_filtered)
+    best_period = round(periods_filtered[best_idx])
+    best_power = powers_filtered[best_idx]
+    
+    powers_without_peak = np.concatenate([powers_filtered[:best_idx], powers_filtered[best_idx+1:]])
+    if len(powers_without_peak) > 0:
+        median_power_background = np.median(powers_without_peak)
+        peak_to_background = best_power / (median_power_background + EPSILON)
+    else:
+        peak_to_background = best_power / EPSILON
+    
+    return {
+        "best_period": best_period,
+        "best_power": best_power,
+        "peak_to_background": peak_to_background,
+    }
+
+
+def run_fft_zeropad_wide(
+    offsets: np.ndarray,
+    values: np.ndarray,
+    period_search_min: float = 10.0,
+    period_search_max: float = 50.0,
+) -> dict:
+    """Run FFT with zero-padding and WIDE search window (10-50 days).
+    
+    Apply "widen and filter" strategy: search broadly, filter to 24-35 in post-processing.
+    
+    Args:
+        offsets: Time offsets (days from CD1)
+        values: Feature values at each offset (should be pre-normalized per user)
+        period_search_min: Minimum period to search (days, default 10)
+        period_search_max: Maximum period to search (days, default 50)
+        
+    Returns:
+        dict with best_period, best_power, peak_to_background (best in 10-50 range)
+    """
+    if len(offsets) < 2:
+        return {
+            "best_period": None,
+            "best_power": 0.0,
+            "peak_to_background": 0.0,
+        }
+    
+    offset_min = int(np.floor(offsets.min()))
+    offset_max = int(np.ceil(offsets.max()))
+    regular_offsets = np.arange(offset_min, offset_max + 1)
+    regular_values = np.interp(regular_offsets, offsets, values)
+    regular_values = regular_values - np.mean(regular_values)
+    
+    n_original = len(regular_values)
+    n_padded = 2 ** int(np.ceil(np.log2(n_original)))
+    regular_values_padded = np.pad(regular_values, (0, n_padded - n_original), mode='constant')
+    
+    n = len(regular_values_padded)
+    fft_vals = fft(regular_values_padded)
+    freqs = fftfreq(n, d=1.0)
+    
+    positive_freqs = freqs[: n // 2]
+    periods = 1.0 / positive_freqs[1:]
+    powers = np.abs(fft_vals[: n // 2])[1:] ** 2
+    
+    mask = (periods >= period_search_min) & (periods <= period_search_max)
+    periods_filtered = periods[mask]
+    powers_filtered = powers[mask]
+    
+    if len(powers_filtered) == 0:
+        return {
+            "best_period": None,
+            "best_power": 0.0,
+            "peak_to_background": 0.0,
+        }
+    
+    best_idx = np.argmax(powers_filtered)
+    best_period = round(periods_filtered[best_idx])
+    best_power = powers_filtered[best_idx]
+    
+    powers_without_peak = np.concatenate([powers_filtered[:best_idx], powers_filtered[best_idx+1:]])
+    if len(powers_without_peak) > 0:
+        median_power_background = np.median(powers_without_peak)
+        peak_to_background = best_power / (median_power_background + EPSILON)
+    else:
+        peak_to_background = best_power / EPSILON
+    
+    return {
+        "best_period": best_period,
+        "best_power": best_power,
+        "peak_to_background": peak_to_background,
     }
 
 
@@ -601,6 +1105,185 @@ def analyze_all_users_periodicity(
     
     results_df = pd.DataFrame(results)
     print(f"✓ Analysis complete: {len(results_df)} results")
+    return results_df
+
+
+def analyze_all_users_with_normalizations(
+    timeline_df: pd.DataFrame,
+    base_features: list[str],
+    normalizations: list[str],
+    user_col: str = "author",
+    period_min: float = DEFAULT_PERIOD_MIN,
+    period_max: float = DEFAULT_PERIOD_MAX,
+    period_wide_min: float = 10.0,
+    period_wide_max: float = 50.0,
+    filter_range: bool = False,
+    fap_threshold: float = 0.1,
+    snr_threshold: float = 3.0,
+    methods: list[str] | None = None,
+) -> pd.DataFrame:
+    """Run periodicity detection with multiple normalization methods for comparison.
+    
+    This function analyzes BASE features (e.g., sentiment_compound) and applies
+    different normalizations (zscore, minmax) to create a proper comparison.
+    
+    Args:
+        timeline_df: DataFrame with columns: user_col, offset_from_cd1, and base feature columns
+        base_features: List of BASE feature names (e.g., ['sentiment_compound', 'textblob_polarity'])
+        normalizations: List of normalization methods (e.g., ['zscore', 'minmax'])
+        user_col: Column name for user identifier
+        period_min: Min period (used for narrow FFT, not for filtering)
+        period_max: Max period (used for narrow FFT, not for filtering)
+        period_wide_min: Min period for wide FFT search (default: 10.0)
+        period_wide_max: Max period for wide FFT search (default: 50.0)
+        filter_range: If True, filter results to period_min-period_max (default: False)
+        fap_threshold: False Alarm Probability threshold for LS filtering (default: 0.1)
+        snr_threshold: Peak-to-background threshold for FFT filtering (default: 3.0)
+    
+    Returns:
+        Long-format DataFrame with columns:
+        - user, feature, normalization, method, period, power, fap, peak_to_background, n_points, span_days
+    """
+    print(f"Analyzing {len(base_features)} base features × {len(normalizations)} normalizations for {timeline_df[user_col].nunique()} users...")
+    
+    results = []
+    
+    for base_feature in base_features:
+        if base_feature not in timeline_df.columns:
+            print(f"  Warning: {base_feature} not found, skipping")
+            continue
+        
+        for normalization in normalizations:
+            print(f"  Processing {base_feature} with {normalization} normalization...")
+            
+            for user, user_df in timeline_df.groupby(user_col):
+                analysis = analyze_user_timeline(
+                    user_df,
+                    feature_col=base_feature,
+                    period_min=period_min,
+                    period_max=period_max,
+                    period_wide_min=period_wide_min,
+                    period_wide_max=period_wide_max,
+                    normalize_method=normalization,
+                    methods=methods,
+                )
+                
+                if analysis is None:
+                    continue
+                
+                # Extract results for each method that was run (conditional on presence in analysis dict)
+                if "ls_period" in analysis:
+                    results.append({
+                        "user": user,
+                        "feature": base_feature,
+                        "normalization": normalization,
+                        "method": "lombscargle",
+                        "period": analysis["ls_period"],
+                        "power": analysis["ls_power"],
+                        "fap": analysis["ls_fap"],
+                        "n_points": analysis["n_points"],
+                        "span_days": analysis["span_days"],
+                    })
+                
+                if "fft_interp_period" in analysis:
+                    results.append({
+                        "user": user,
+                        "feature": base_feature,
+                        "normalization": normalization,
+                        "method": "fft_interpolation",
+                        "period": analysis["fft_interp_period"],
+                        "power": analysis["fft_interp_power"],
+                        "peak_to_background": analysis["fft_interp_peak_to_background"],
+                        "n_points": analysis["n_points"],
+                        "span_days": analysis["span_days"],
+                    })
+                
+                if "fft_zeropad_period" in analysis:
+                    results.append({
+                        "user": user,
+                        "feature": base_feature,
+                        "normalization": normalization,
+                        "method": "fft_zeropad",
+                        "period": analysis["fft_zeropad_period"],
+                        "power": analysis["fft_zeropad_power"],
+                        "peak_to_background": analysis["fft_zeropad_peak_to_background"],
+                        "n_points": analysis["n_points"],
+                        "span_days": analysis["span_days"],
+                    })
+                
+                if "fft_interp_wide_period" in analysis:
+                    results.append({
+                        "user": user,
+                        "feature": base_feature,
+                        "normalization": normalization,
+                        "method": "fft_interp_wide",
+                        "period": analysis["fft_interp_wide_period"],
+                        "power": analysis["fft_interp_wide_power"],
+                        "peak_to_background": analysis["fft_interp_wide_peak_to_background"],
+                        "n_points": analysis["n_points"],
+                        "span_days": analysis["span_days"],
+                    })
+                
+                if "fft_zeropad_wide_period" in analysis:
+                    results.append({
+                        "user": user,
+                        "feature": base_feature,
+                        "normalization": normalization,
+                        "method": "fft_zeropad_wide",
+                        "period": analysis["fft_zeropad_wide_period"],
+                        "power": analysis["fft_zeropad_wide_power"],
+                        "peak_to_background": analysis["fft_zeropad_wide_peak_to_background"],
+                        "n_points": analysis["n_points"],
+                        "span_days": analysis["span_days"],
+                    })
+    
+    results_df = pd.DataFrame(results)
+    print(f"✓ Analysis complete: {len(results_df)} results (before filtering)")
+    
+    # Apply FAP filtering to LS results (only if fap column exists)
+    ls_before = (results_df["method"] == "lombscargle").sum()
+    if ls_before > 0 and "fap" in results_df.columns:
+        ls_filtered = results_df[
+            (results_df["method"] == "lombscargle") & 
+            (results_df["fap"] < fap_threshold)
+        ]
+        ls_after = len(ls_filtered)
+    else:
+        ls_filtered = results_df[results_df["method"] == "lombscargle"]
+        ls_after = len(ls_filtered)
+    
+    # Apply peak_to_background filtering to FFT results (only if column exists)
+    fft_results = results_df[results_df["method"] != "lombscargle"]
+    fft_before = len(fft_results)
+    if fft_before > 0 and "peak_to_background" in results_df.columns:
+        fft_filtered = fft_results[fft_results["peak_to_background"] > snr_threshold]
+        fft_after = len(fft_filtered)
+    else:
+        fft_filtered = fft_results
+        fft_after = len(fft_filtered)
+    
+    # Combine
+    results_df = pd.concat([ls_filtered, fft_filtered], ignore_index=True)
+    
+    if ls_before > 0 and "fap" in results_df.columns:
+        print(f"  ✓ LS filtered by FAP < {fap_threshold}: {ls_before} → {ls_after} ({ls_before - ls_after} dropped)")
+    elif ls_before > 0:
+        print(f"  ✓ LS results: {ls_before} (no FAP column, skipping filter)")
+    if fft_before > 0 and "peak_to_background" in results_df.columns:
+        print(f"  ✓ FFT filtered by peak_to_background > {snr_threshold}: {fft_before} → {fft_after} ({fft_before - fft_after} dropped)")
+    elif fft_before > 0:
+        print(f"  ✓ FFT results: {fft_before} (no peak_to_background column, skipping filter)")
+    
+    if filter_range:
+        # Optional range filtering (applied to all methods)
+        print(f"  Applying range filter [{period_min}-{period_max}] days...")
+        before_range = len(results_df)
+        results_df = results_df[
+            (results_df["period"] >= period_min) & 
+            (results_df["period"] <= period_max)
+        ].copy()
+        print(f"  ✓ After range filtering: {before_range} → {len(results_df)} results")
+    
     return results_df
 
 

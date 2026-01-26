@@ -356,14 +356,18 @@ def load_users_database(
 def build_anchor_dict(users_df: pd.DataFrame, pattern_type: str = "cd") -> dict[str, tuple[pd.Timestamp, int]]:
     """Build anchor lookup dictionary from users database.
     
+    The anchor's offset (e.g., CD5 if anchor says "period 5 days ago") is preserved
+    and used in offset calculation: offset = anchor_value + days_diff.
+    This correctly accounts for the anchor post's position in the cycle.
+    
     Args:
         users_df: Users database DataFrame with columns: user, timestep, offset_from_cd1 or dpo_days
         pattern_type: "cd" for cycle day patterns, "dpo" for DPO patterns (default: "cd")
     
     Returns:
         Dictionary mapping user -> (anchor_timestamp, anchor_value)
-        For CD patterns: anchor_value is offset_from_cd1
-        For DPO patterns: anchor_value is dpo_days
+        For CD patterns: anchor_value is offset_from_cd1 (preserved from database)
+        For DPO patterns: anchor_value is dpo_days (preserved from database)
     """
     anchors = {}
     value_col = "dpo_days" if pattern_type == "dpo" else "offset_from_cd1"

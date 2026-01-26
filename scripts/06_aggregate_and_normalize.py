@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Step 6: Aggregate posts by day and apply per-user z-score normalization.
+"""Step 6: Aggregate posts by day.
 
-Aggregates multiple posts per day into one data point by averaging features,
-then applies per-user z-score normalization to make features comparable.
+Aggregates multiple posts per day into one data point by averaging raw features.
+Normalization will be done later in the analysis step (inside analyze_user_timeline).
 
 Input:
 - Timeline with offsets from step 5: data/interim/timeline_with_offsets_*.csv
 
 Output:
 - data/interim/timeline_daily_aggregated_{timestamp}.csv
-  (columns: author, offset_from_cd1, {feature}_mean, {feature}_zscore for each feature)
+  (columns: author, offset_from_cd1, {feature}_mean for each feature)
 """
 
 from __future__ import annotations
@@ -23,7 +23,6 @@ from src.config import load_config
 from src.io import find_latest_file, save_with_timestamp
 from src.analysis import (
     aggregate_all_features_by_day,
-    normalize_features_per_user_zscore,
 )
 from src.utils import identify_feature_columns
 
@@ -33,18 +32,17 @@ def main(
     use_checkpoint: bool = True,
     force_recompute: bool = False,
 ):
-    """Aggregate posts by day and apply per-user z-score normalization."""
+    """Aggregate posts by day (normalization happens later in analysis)."""
     cfg = load_config(config_path)
     
     interim_dir = Path(cfg["paths"]["interim"])
-    normalize = cfg.get("pipeline", {}).get("normalize_features", True)
     
     interim_dir.mkdir(parents=True, exist_ok=True)
     
     print("=" * 60)
-    print("Step 6: Aggregate by Day & Normalize")
+    print("Step 6: Aggregate by Day")
     print("=" * 60)
-    print(f"  Normalization: {'Enabled' if normalize else 'Disabled'}")
+    print("  Note: Normalization will be done in analysis step (inside analyze_user_timeline)")
     print()
     
     # Check for checkpoint
@@ -77,7 +75,7 @@ def main(
     if len(feature_cols) == 0:
         raise ValueError("No feature columns found in timeline")
     
-    # Step 3: Aggregate by day
+    # Step 3: Aggregate raw features by day (normalization happens later in analysis)
     print("\n[Step 6.3] Aggregating posts by day...")
     daily_agg = aggregate_all_features_by_day(
         timeline_df=timeline_df,
@@ -87,26 +85,12 @@ def main(
     )
     print(f"  ✓ Aggregated to {len(daily_agg):,} (user, day) combinations")
     
-    # Step 4: Apply per-user z-score normalization
-    if normalize:
-        print("\n[Step 6.4] Applying per-user z-score normalization...")
-        feature_mean_cols = [f"{feature}_mean" for feature in feature_cols if f"{feature}_mean" in daily_agg.columns]
-        
-        daily_agg = normalize_features_per_user_zscore(
-            daily_agg_df=daily_agg,
-            feature_mean_cols=feature_mean_cols,
-            user_col='author',
-        )
-        print(f"  ✓ Normalization complete")
-    else:
-        print("\n[Step 6.4] Skipping normalization (disabled in config)")
-    
     print(f"\n✓ Final: {len(daily_agg):,} (user, day) combinations")
     print(f"  Users: {daily_agg['author'].nunique():,}")
     print(f"  Days per user: {len(daily_agg) / daily_agg['author'].nunique():.1f} (average)")
     
-    # Step 5: Save checkpoint
-    print("\n[Step 6.5] Saving checkpoint...")
+    # Step 4: Save checkpoint
+    print("\n[Step 6.4] Saving checkpoint...")
     output_file = save_with_timestamp(
         daily_agg,
         interim_dir,
@@ -119,7 +103,7 @@ def main(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Step 6: Aggregate posts by day and apply per-user z-score normalization"
+        description="Step 6: Aggregate posts by day (normalization happens later in analysis)"
     )
     parser.add_argument(
         "--config",

@@ -417,10 +417,10 @@ def normalize_features_per_user(
     feature_cols: list[str],
     user_col: str = "author",
 ) -> pd.DataFrame:
-    """Normalize features per user using zscore and minmax methods.
+    """Normalize features per user using zscore method.
     
     For each user, normalizes specified features independently.
-    Adds columns: {feature}_zscore, {feature}_minmax for each feature.
+    Adds columns: {feature}_zscore for each feature.
     
     Args:
         df: DataFrame with features to normalize
@@ -434,6 +434,9 @@ def normalize_features_per_user(
     
     print(f"Normalizing {len(feature_cols)} features per user...")
     
+    # Build all normalized columns at once to avoid DataFrame fragmentation
+    normalized_data = {}
+    
     for feature in feature_cols:
         if feature not in df.columns:
             print(f"  Warning: {feature} not found, skipping")
@@ -442,10 +445,9 @@ def normalize_features_per_user(
         print(f"  Processing {feature}...")
         
         zscore_col = f"{feature}_zscore"
-        minmax_col = f"{feature}_minmax"
         
-        df[zscore_col] = np.nan
-        df[minmax_col] = np.nan
+        # Initialize with NaN
+        zscore_values = np.full(len(df), np.nan, dtype=np.float64)
         
         for user, group in df.groupby(user_col):
             values = group[feature].values
@@ -457,13 +459,18 @@ def normalize_features_per_user(
                 continue
             
             idx = group.index
-            df.loc[idx, zscore_col] = normalize_values(values, method="zscore")
-            df.loc[idx, minmax_col] = normalize_values(values, method="minmax")
+            zscore_values[idx] = normalize_values(values, method="zscore")
         
-        valid_zscore = df[zscore_col].notna().sum()
-        valid_minmax = df[minmax_col].notna().sum()
+        # Store in dictionary to add all at once later
+        normalized_data[zscore_col] = zscore_values
+        
+        valid_zscore = (~np.isnan(zscore_values)).sum()
         print(f"    ✓ {zscore_col}: {valid_zscore} valid entries")
-        print(f"    ✓ {minmax_col}: {valid_minmax} valid entries")
+    
+    # Add all normalized columns at once using pd.concat to avoid fragmentation
+    if normalized_data:
+        normalized_df = pd.DataFrame(normalized_data, index=df.index)
+        df = pd.concat([df, normalized_df], axis=1)
     
     print("✓ Per-user normalization complete")
     return df
