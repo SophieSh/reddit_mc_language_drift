@@ -1,5 +1,5 @@
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from src.config import load_config
 from src.preprocess import (
     filter_deleted_authors,
@@ -69,7 +69,7 @@ def main(cfg_path: str, test_sample: int | None = None):
         print(f"\nSampling {test_sample} posts for testing...")
         df = df.sample(n=min(test_sample, len(df)), random_state=cfg['seed']).reset_index(drop=True)
         print(f"Using {len(df)} posts for preprocessing")
-    df = add_timestamp_columns(df)
+    df = add_timestamp_columns(df, add_date_string=True)
     df = fix_removed_posts_selftext(df)
     df = concatenate_title_selftext(df)
     df = add_matched_pattern_moon3(df, moon3_patterns)
@@ -82,7 +82,7 @@ def main(cfg_path: str, test_sample: int | None = None):
     
     df_output = df.drop(columns=['matched_phrase'], errors='ignore')
     
-    timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     output_path = interim_dir / f"moon3_with_uncertainty_{timestamp}.csv"
     df_output.to_csv(output_path, index=False, encoding='utf-8-sig')
     

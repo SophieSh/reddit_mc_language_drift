@@ -1,5 +1,5 @@
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from src.config import load_config
 from src.preprocess import (
     filter_deleted_authors,
@@ -27,7 +27,7 @@ def main(cfg_path: str):
     
     df = pd.read_excel(raw_dir / moon1_anchors)
     df = filter_deleted_authors(df)
-    df = add_timestamp_columns(df)
+    df = add_timestamp_columns(df, add_date_string=True)
     df = fix_removed_posts_selftext(df)
     df = concatenate_title_selftext(df)
     df = add_matched_pattern_moon1(df, moon1_patterns)
@@ -40,7 +40,7 @@ def main(cfg_path: str):
     
     df_output = df.drop(columns=['matched_phrase'], errors='ignore')
     
-    timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     output_path = interim_dir / f"moon_with_uncertainty_{timestamp}.csv"
     df_output.to_csv(output_path, index=False, encoding='utf-8-sig')
     
