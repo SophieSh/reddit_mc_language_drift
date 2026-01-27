@@ -46,7 +46,7 @@ def validate_feature_files(cfg: dict) -> tuple[bool, str]:
         if len(df2.columns) == 0:
             return False, f"moon2 file has no columns: {moon2_file}"
         
-        return True, f"✓ Validated {len(df1.columns)} columns in moon1, {len(df2.columns)} columns in moon2"
+        return True, f" Validated {len(df1.columns)} columns in moon1, {len(df2.columns)} columns in moon2"
         
     except Exception as e:
         return False, f"Error reading feature files: {e}"
@@ -65,7 +65,7 @@ def main(config_path: str):
     
     if is_valid:
         print(message)
-        print("\n✓ Feature files validated successfully")
+        print("\n Feature files validated successfully")
         return 0
     else:
         print(f"✗ Validation failed: {message}")

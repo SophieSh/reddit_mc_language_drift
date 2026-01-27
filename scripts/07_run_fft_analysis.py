@@ -65,7 +65,7 @@ def main(
     checkpoint = find_latest_file(interim_dir, checkpoint_pattern)
     
     if use_checkpoint and not force_recompute and checkpoint:
-        print(f"✓ Found checkpoint: {checkpoint.name}")
+        print(f" Found checkpoint: {checkpoint.name}")
         print(f"  To recompute, use --force-recompute")
         return 0
     
@@ -80,7 +80,7 @@ def main(
         )
     
     daily_agg = pd.read_csv(timeline_file, encoding='utf-8-sig', low_memory=False)
-    print(f"  ✓ Loaded {len(daily_agg):,} (user, day) combinations from {timeline_file.name}")
+    print(f"   Loaded {len(daily_agg):,} (user, day) combinations from {timeline_file.name}")
     print(f"  Users: {daily_agg['author'].nunique():,}")
     
     # Step 2: Identify feature columns (ending in _mean from aggregation)
@@ -97,7 +97,7 @@ def main(
     # Get base feature names (remove _mean suffix)
     feature_base_names = [col.replace('_mean', '') for col in mean_cols]
     
-    print(f"  ✓ Found {len(mean_cols)} features to analyze")
+    print(f"   Found {len(mean_cols)} features to analyze")
     
     # Step 3: Run FFT analysis for each user-feature combination
     # Use old approach: analyze_user_timeline handles aggregation and normalization internally
@@ -164,7 +164,7 @@ def main(
     
     results_df = pd.DataFrame(results)
     
-    print(f"\n✓ Analysis complete: {len(results_df):,} results")
+    print(f"\n Analysis complete: {len(results_df):,} results")
     print(f"  Users with detections: {results_df['user'].nunique():,}")
     print(f"  Features with detections: {results_df['feature'].nunique()}")
     
@@ -175,7 +175,7 @@ def main(
         interim_dir,
         f"periodicity_results_{method}_snr{snr_threshold}"
     )
-    print(f"  ✓ Saved: {output_file.name}")
+    print(f"   Saved: {output_file.name}")
     
     # Print summary statistics
     print(f"\nSummary statistics:")

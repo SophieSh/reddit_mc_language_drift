@@ -59,7 +59,7 @@ def main(
     checkpoint = find_latest_file(interim_dir, "consensus_periods_*.csv")
     
     if use_checkpoint and not force_recompute and checkpoint:
-        print(f"✓ Found checkpoint: {checkpoint.name}")
+        print(f" Found checkpoint: {checkpoint.name}")
         print(f"  To recompute, use --force-recompute")
         return 0
     
@@ -80,7 +80,7 @@ def main(
             )
     
     periodicity_df = pd.read_csv(periodicity_path, encoding='utf-8-sig', low_memory=False)
-    print(f"  ✓ Loaded {len(periodicity_df):,} periodicity results from {periodicity_path.name}")
+    print(f"   Loaded {len(periodicity_df):,} periodicity results from {periodicity_path.name}")
     
     # Original features used in biologically-aligned results
     ORIGINAL_FEATURES = [
@@ -102,7 +102,7 @@ def main(
         original_count = len(periodicity_df)
         periodicity_df = periodicity_df[periodicity_df['feature'].isin(ORIGINAL_FEATURES)].copy()
         filtered_count = len(periodicity_df)
-        print(f"  ✓ Filtered to {filtered_count:,} results from {len(ORIGINAL_FEATURES)} original features (from {original_count:,} total)")
+        print(f"   Filtered to {filtered_count:,} results from {len(ORIGINAL_FEATURES)} original features (from {original_count:,} total)")
     
     # Filter to pattern_1 users only if requested (moon1 only, excluding moon2)
     if pattern_1_only:
@@ -116,7 +116,7 @@ def main(
         after_count = len(periodicity_df)
         after_users = periodicity_df['user'].nunique()
         
-        print(f"  ✓ Filtered to {after_count:,} results from {after_users:,} pattern_1 users (from {before_count:,} results, {before_users:,} users)")
+        print(f"   Filtered to {after_count:,} results from {after_users:,} pattern_1 users (from {before_count:,} results, {before_users:,} users)")
     
     print(f"  Users: {periodicity_df['user'].nunique():,}")
     print(f"  Features: {periodicity_df['feature'].nunique()}")
@@ -135,7 +135,7 @@ def main(
         print(f"    Try reducing min_features or increasing tolerance")
         return 1
     
-    print(f"  ✓ Consensus assigned to {len(consensus_df):,} users")
+    print(f"   Consensus assigned to {len(consensus_df):,} users")
     
     # Step 3: Print statistics
     print(f"\n[Step 8.3] Consensus statistics:")
@@ -158,7 +158,7 @@ def main(
         interim_dir,
         f"consensus_periods_min{min_features}features"
     )
-    print(f"  ✓ Saved: {output_file.name}")
+    print(f"   Saved: {output_file.name}")
     
     return 0
 

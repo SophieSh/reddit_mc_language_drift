@@ -65,7 +65,7 @@ def main(
             )
     
     periodicity_df = pd.read_csv(periodicity_path, encoding='utf-8-sig', low_memory=False)
-    print(f"  ✓ Loaded {len(periodicity_df):,} periodicity results from {periodicity_path.name}")
+    print(f"   Loaded {len(periodicity_df):,} periodicity results from {periodicity_path.name}")
     
     # Original features used in biologically-aligned results
     ORIGINAL_FEATURES = [
@@ -87,7 +87,7 @@ def main(
         original_count = len(periodicity_df)
         periodicity_df = periodicity_df[periodicity_df['feature'].isin(ORIGINAL_FEATURES)].copy()
         filtered_count = len(periodicity_df)
-        print(f"  ✓ Filtered to {filtered_count:,} results from {len(ORIGINAL_FEATURES)} original features (from {original_count:,} total)")
+        print(f"   Filtered to {filtered_count:,} results from {len(ORIGINAL_FEATURES)} original features (from {original_count:,} total)")
     
     # Filter to pattern_1 users only if requested (moon1 only, excluding moon2)
     if pattern_1_only:
@@ -101,7 +101,7 @@ def main(
         after_count = len(periodicity_df)
         after_users = periodicity_df['user'].nunique()
         
-        print(f"  ✓ Filtered to {after_count:,} results from {after_users:,} pattern_1 users (from {before_count:,} results, {before_users:,} users)")
+        print(f"   Filtered to {after_count:,} results from {after_users:,} pattern_1 users (from {before_count:,} results, {before_users:,} users)")
     
     # Get unique features
     features = sorted(periodicity_df['feature'].unique())
@@ -116,7 +116,7 @@ def main(
     existing_plot = find_latest_file(reports_dir, output_pattern)
     
     if use_checkpoint and not force_recompute and existing_plot:
-        print(f"  ✓ Found existing plot: {existing_plot.name}")
+        print(f"   Found existing plot: {existing_plot.name}")
         print(f"  To recompute, use --force-recompute")
     else:
         from datetime import datetime
@@ -130,7 +130,7 @@ def main(
             output_path,
             period_wide_max=None,  # Auto-detect from data
         )
-        print(f"  ✓ Saved: {output_path.name}")
+        print(f"   Saved: {output_path.name}")
     
     # Step 3: Plot consensus distribution (if available)
     print(f"\n[Step 9.3] Checking for consensus results...")
@@ -144,7 +144,7 @@ def main(
         consensus_path = find_latest_file(interim_dir, "consensus_periods_*.csv")
     
     if consensus_path:
-        print(f"  ✓ Found consensus results: {consensus_path.name}")
+        print(f"   Found consensus results: {consensus_path.name}")
         consensus_df = pd.read_csv(consensus_path, encoding='utf-8-sig', low_memory=False)
         print(f"  Users with consensus: {len(consensus_df):,}")
         
@@ -158,7 +158,7 @@ def main(
             consensus_df = consensus_df[consensus_df['user'].isin(pattern_1_users)].copy()
             after_count = len(consensus_df)
             
-            print(f"  ✓ Filtered to {after_count:,} pattern_1 users (from {before_count:,} total)")
+            print(f"   Filtered to {after_count:,} pattern_1 users (from {before_count:,} total)")
         
         # Create consensus distribution plot
         import matplotlib.pyplot as plt
@@ -168,7 +168,7 @@ def main(
         existing_consensus_plot = find_latest_file(reports_dir, consensus_plot_pattern)
         
         if use_checkpoint and not force_recompute and existing_consensus_plot:
-            print(f"  ✓ Found existing consensus plot: {existing_consensus_plot.name}")
+            print(f"   Found existing consensus plot: {existing_consensus_plot.name}")
         else:
             fig, ax = plt.subplots(figsize=(10, 6))
             
@@ -214,11 +214,11 @@ def main(
             consensus_output_path = reports_dir / f"consensus_distribution_min{min_features}features_{timestamp}.png"
             plt.savefig(consensus_output_path, dpi=150, bbox_inches='tight')
             plt.close()
-            print(f"  ✓ Saved: {consensus_output_path.name}")
+            print(f"   Saved: {consensus_output_path.name}")
     else:
         print(f"  ⚠ No consensus results found. Run scripts/08_consensus.py first to generate consensus.")
     
-    print(f"\n✓ Visualization complete!")
+    print(f"\n Visualization complete!")
     print(f"  Reports saved to: {reports_dir}")
     
     return 0

@@ -56,7 +56,7 @@ def main(
     checkpoint = find_latest_file(interim_dir, "timeline_with_offsets_*.csv")
     
     if use_checkpoint and not force_recompute and checkpoint:
-        print(f"✓ Found checkpoint: {checkpoint.name}")
+        print(f" Found checkpoint: {checkpoint.name}")
         print(f"  To recompute, use --force-recompute")
         return 0
     
@@ -71,7 +71,7 @@ def main(
         )
     
     posts_df = pd.read_csv(posts_file, encoding='utf-8-sig', low_memory=False)
-    print(f"  ✓ Loaded {len(posts_df):,} posts from {posts_file.name}")
+    print(f"   Loaded {len(posts_df):,} posts from {posts_file.name}")
     print(f"  Users: {posts_df['author'].nunique():,}")
     
     # Step 2: Load user database
@@ -85,12 +85,12 @@ def main(
         )
     
     users_df = pd.read_csv(users_db_file, encoding='utf-8-sig')
-    print(f"  ✓ Loaded {len(users_df):,} users from {users_db_file.name}")
+    print(f"   Loaded {len(users_df):,} users from {users_db_file.name}")
     
     # Step 3: Build anchor dictionary
     print("\n[Step 5.3] Building anchor dictionary...")
     anchors = build_anchor_dict(users_df, pattern_type="cd")
-    print(f"  ✓ Created anchor dictionary for {len(anchors):,} users")
+    print(f"   Created anchor dictionary for {len(anchors):,} users")
     
     # Step 4: Calculate offsets
     print("\n[Step 5.4] Calculating offsets from anchors...")
@@ -104,7 +104,7 @@ def main(
     
     # Count posts with valid offsets
     valid_offsets = timeline_df['offset_from_cd1'].notna().sum()
-    print(f"  ✓ Calculated offsets: {valid_offsets:,} posts with valid offsets (from {len(timeline_df):,})")
+    print(f"   Calculated offsets: {valid_offsets:,} posts with valid offsets (from {len(timeline_df):,})")
     
     # Filter to posts with valid offsets
     timeline_df = timeline_df[timeline_df['offset_from_cd1'].notna()].copy()
@@ -122,18 +122,74 @@ def main(
         user_col='author'
     )
     after = len(timeline_df)
-    print(f"  ✓ Filtered to {after:,} posts (from {before:,})")
+    print(f"   Filtered to {after:,} posts (from {before:,})")
     
-    print(f"\n✓ Final timeline: {len(timeline_df):,} posts from {timeline_df['author'].nunique():,} users")
+    print(f"\n Final timeline: {len(timeline_df):,} posts from {timeline_df['author'].nunique():,} users")
     
-    # Step 6: Save checkpoint
-    print("\n[Step 5.6] Saving checkpoint...")
+    # Step 6: Save checkpoint (with anchors)
+    print("\n[Step 5.6] Saving checkpoint (with anchors)...")
     output_file = save_with_timestamp(
         timeline_df,
         interim_dir,
         "timeline_with_offsets"
     )
-    print(f"  ✓ Saved: {output_file.name}")
+    print(f"   Saved (with anchors): {output_file.name}")
+    
+    # Step 7: Optionally build timeline WITHOUT anchors
+    from src.io import find_latest_file as _find_latest  # reuse helper with local alias
+    from src.preprocess import filter_posts_by_anchor_window
+    
+    print("\n[Step 5.7] Building timeline without anchors (if posts file exists)...")
+    no_anchors_file = _find_latest(interim_dir, "posts_all_users_preprocessed_no_anchors_*.csv")
+    
+    if no_anchors_file is None:
+        print("  No 'posts_all_users_preprocessed_no_anchors_*.csv' file found; skipping timeline_without_anchors.")
+    else:
+        print(f"  Using posts file without anchors: {no_anchors_file.name}")
+        posts_no_anchors_df = pd.read_csv(no_anchors_file, encoding='utf-8-sig', low_memory=False)
+        print(f"   Loaded {len(posts_no_anchors_df):,} posts from {posts_no_anchors_df['author'].nunique():,} users")
+        
+        # Calculate offsets from anchors
+        print("  Calculating offsets from anchors (no anchors in posts)...")
+        timeline_no_anchors_df = add_offsets_from_anchors(
+            posts_no_anchors_df,
+            anchors,
+            author_col='author',
+            timestamp_col='ts_utc',
+            pattern_type='cd'
+        )
+        
+        valid_offsets_no = timeline_no_anchors_df['offset_from_cd1'].notna().sum()
+        print(f"   Calculated offsets (no anchors): {valid_offsets_no:,} posts with valid offsets "
+              f"(from {len(timeline_no_anchors_df):,})")
+        
+        # Filter to posts with valid offsets
+        timeline_no_anchors_df = timeline_no_anchors_df[
+            timeline_no_anchors_df['offset_from_cd1'].notna()
+        ].copy()
+        
+        # Apply the same time window filtering
+        print(f"  Filtering to ±{window_months} months around anchor (no anchors)...")
+        before_no = len(timeline_no_anchors_df)
+        timeline_no_anchors_df = filter_posts_by_anchor_window(
+            timeline_no_anchors_df,
+            users_df,
+            window_months=window_months,
+            user_col='author'
+        )
+        after_no = len(timeline_no_anchors_df)
+        print(f"   Filtered to {after_no:,} posts (from {before_no:,})")
+        
+        print(f"  Final timeline without anchors: {len(timeline_no_anchors_df):,} posts "
+              f"from {timeline_no_anchors_df['author'].nunique():,} users")
+        
+        # Save checkpoint without anchors
+        output_file_no = save_with_timestamp(
+            timeline_no_anchors_df,
+            interim_dir,
+            "timeline_with_offsets_no_anchors"
+        )
+        print(f"   Saved (no anchors): {output_file_no.name}")
     
     return 0
 

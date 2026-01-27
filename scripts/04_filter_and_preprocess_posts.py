@@ -117,7 +117,7 @@ def main(
     checkpoint = find_latest_file(interim_dir, "posts_all_users_preprocessed_*.csv")
     
     if use_checkpoint and not force_recompute and checkpoint:
-        print(f"✓ Found checkpoint: {checkpoint.name}")
+        print(f" Found checkpoint: {checkpoint.name}")
         print(f"  To recompute, use --force-recompute")
         return 0
     
@@ -133,7 +133,7 @@ def main(
     
     users_df = pd.read_csv(users_db_file, encoding='utf-8-sig')
     target_users = set(users_df["user"].astype(str))
-    print(f"  ✓ Loaded {len(target_users):,} users from {users_db_file.name}")
+    print(f"   Loaded {len(target_users):,} users from {users_db_file.name}")
     
     # Step 2: Load posts with features
     print("\n[Step 4.2] Loading posts with precomputed features...")
@@ -143,12 +143,12 @@ def main(
         target_users=target_users,
         min_chars=min_chars,
     )
-    print(f"  ✓ Total posts loaded: {len(posts_df):,}")
+    print(f"   Total posts loaded: {len(posts_df):,}")
     
     # Step 3: Identify feature columns
     print("\n[Step 4.3] Identifying feature columns...")
     feature_cols = identify_feature_columns(posts_df, cfg)
-    print(f"  ✓ Found {len(feature_cols)} feature columns")
+    print(f"   Found {len(feature_cols)} feature columns")
     
     # Step 4: Remove users with ANY NaN in ANY feature
     print("\n[Step 4.4] Removing users with NaN in features...")
@@ -190,16 +190,55 @@ def main(
     after = len(posts_df)
     print(f"  Filtered by min_chars={min_chars}: {after:,} posts remaining (from {before:,})")
     
-    print(f"\n✓ Final: {len(posts_df):,} posts from {posts_df['author'].nunique():,} users")
+    print(f"\n Final (before anchor removal): {len(posts_df):,} posts from {posts_df['author'].nunique():,} users")
     
-    # Step 6: Save checkpoint
-    print("\n[Step 4.6] Saving checkpoint...")
-    output_file = save_with_timestamp(
+    # Step 5.5: Create version without anchor posts
+    # Anchors are identified in the users database by (user, timestep);
+    # after preprocessing we have (author, ts_utc). We remove any posts
+    # whose (author, ts_utc) pair appears in the users database.
+    posts_no_anchors = posts_df.copy()
+    if 'timestep' in users_df.columns and 'ts_utc' in posts_df.columns:
+        print("\n[Step 4.5b] Removing anchor posts based on user database...")
+        
+        anchor_keys = users_df[['user', 'timestep']].dropna().copy()
+        anchor_keys['user'] = anchor_keys['user'].astype(str)
+        anchor_keys['timestep'] = pd.to_datetime(anchor_keys['timestep'])
+        
+        posts_df['author'] = posts_df['author'].astype(str)
+        posts_df['ts_utc'] = pd.to_datetime(posts_df['ts_utc'])
+        
+        # Build a boolean mask for anchors
+        anchor_set = set(zip(anchor_keys['user'], anchor_keys['timestep']))
+        is_anchor = [
+            (u, t) in anchor_set
+            for u, t in zip(posts_df['author'], posts_df['ts_utc'])
+        ]
+        is_anchor = pd.Series(is_anchor, index=posts_df.index)
+        
+        n_anchors = int(is_anchor.sum())
+        print(f"  Identified {n_anchors:,} anchor posts")
+        
+        posts_no_anchors = posts_df[~is_anchor].copy()
+        print(f"  Posts without anchors: {len(posts_no_anchors):,}")
+    else:
+        print("\n[Step 4.5b] Warning: timestep/ts_utc columns missing; cannot remove anchor posts.")
+    
+    # Step 6: Save checkpoints (with and without anchors)
+    print("\n[Step 4.6] Saving checkpoints...")
+    
+    output_with = save_with_timestamp(
         posts_df,
         interim_dir,
         "posts_all_users_preprocessed"
     )
-    print(f"  ✓ Saved: {output_file.name}")
+    print(f"   Saved (with anchors): {output_with.name}")
+    
+    output_no = save_with_timestamp(
+        posts_no_anchors,
+        interim_dir,
+        "posts_all_users_preprocessed_no_anchors"
+    )
+    print(f"   Saved (no anchors): {output_no.name}")
     
     return 0
 

@@ -49,7 +49,7 @@ def main(
     checkpoint = find_latest_file(interim_dir, "timeline_daily_aggregated_*.csv")
     
     if use_checkpoint and not force_recompute and checkpoint:
-        print(f"✓ Found checkpoint: {checkpoint.name}")
+        print(f" Found checkpoint: {checkpoint.name}")
         print(f"  To recompute, use --force-recompute")
         return 0
     
@@ -64,13 +64,13 @@ def main(
         )
     
     timeline_df = pd.read_csv(timeline_file, encoding='utf-8-sig', low_memory=False)
-    print(f"  ✓ Loaded {len(timeline_df):,} posts from {timeline_file.name}")
+    print(f"   Loaded {len(timeline_df):,} posts from {timeline_file.name}")
     print(f"  Users: {timeline_df['author'].nunique():,}")
     
     # Step 2: Identify feature columns
     print("\n[Step 6.2] Identifying feature columns...")
     feature_cols = identify_feature_columns(timeline_df, cfg)
-    print(f"  ✓ Found {len(feature_cols)} feature columns")
+    print(f"   Found {len(feature_cols)} feature columns")
     
     if len(feature_cols) == 0:
         raise ValueError("No feature columns found in timeline")
@@ -83,9 +83,9 @@ def main(
         user_col='author',
         time_col='offset_from_cd1',
     )
-    print(f"  ✓ Aggregated to {len(daily_agg):,} (user, day) combinations")
+    print(f"   Aggregated to {len(daily_agg):,} (user, day) combinations")
     
-    print(f"\n✓ Final: {len(daily_agg):,} (user, day) combinations")
+    print(f"\n Final: {len(daily_agg):,} (user, day) combinations")
     print(f"  Users: {daily_agg['author'].nunique():,}")
     print(f"  Days per user: {len(daily_agg) / daily_agg['author'].nunique():.1f} (average)")
     
@@ -96,7 +96,7 @@ def main(
         interim_dir,
         "timeline_daily_aggregated"
     )
-    print(f"  ✓ Saved: {output_file.name}")
+    print(f"   Saved: {output_file.name}")
     
     return 0
 
