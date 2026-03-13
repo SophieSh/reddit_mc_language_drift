@@ -113,8 +113,8 @@ def main(
     print("=" * 60)
     print()
     
-    # Check for checkpoint
-    checkpoint = find_latest_file(interim_dir, "posts_all_users_preprocessed_*.csv")
+    # Check for checkpoint (with anchors version)
+    checkpoint = find_latest_file(interim_dir, "posts_all_users_preprocessed_with_anchors_*.csv")
     
     if use_checkpoint and not force_recompute and checkpoint:
         print(f" Found checkpoint: {checkpoint.name}")
@@ -229,7 +229,7 @@ def main(
     output_with = save_with_timestamp(
         posts_df,
         interim_dir,
-        "posts_all_users_preprocessed"
+        "posts_all_users_preprocessed_with_anchors"
     )
     print(f"   Saved (with anchors): {output_with.name}")
     

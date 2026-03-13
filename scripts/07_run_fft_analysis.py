@@ -7,8 +7,9 @@ Runs FFT periodicity detection on all features using the old approach:
 - This matches the old working version's data flow
 
 Input:
-- Daily aggregated timeline from step 6: data/interim/timeline_daily_aggregated_*.csv
+- Daily aggregated timeline from step 6: data/interim/timeline_daily_aggregated_with_anchors_*.csv
   (columns: author, offset_from_cd1, {feature}_mean for each feature)
+  Note: FFT analysis always uses the timeline WITH anchors.
 
 Output:
 - data/interim/periodicity_results_{timestamp}.csv
@@ -69,13 +70,13 @@ def main(
         print(f"  To recompute, use --force-recompute")
         return 0
     
-    # Step 1: Load daily aggregated timeline
-    print("[Step 7.1] Loading daily aggregated timeline...")
-    timeline_file = find_latest_file(interim_dir, "timeline_daily_aggregated_*.csv")
+    # Step 1: Load daily aggregated timeline (WITH anchors - FFT always uses anchors)
+    print("[Step 7.1] Loading daily aggregated timeline (with anchors)...")
+    timeline_file = find_latest_file(interim_dir, "timeline_daily_aggregated_with_anchors_*.csv")
     
     if not timeline_file:
         raise FileNotFoundError(
-            f"No daily aggregated timeline found in {interim_dir}. "
+            f"No daily aggregated timeline with anchors found in {interim_dir}. "
             "Please run scripts/06_aggregate_and_normalize.py first."
         )
     

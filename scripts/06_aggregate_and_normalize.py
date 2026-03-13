@@ -45,17 +45,17 @@ def main(
     print("  Note: Normalization will be done in analysis step (inside analyze_user_timeline)")
     print()
     
-    # Check for checkpoint
-    checkpoint = find_latest_file(interim_dir, "timeline_daily_aggregated_*.csv")
+    # Check for checkpoint (with anchors version)
+    checkpoint = find_latest_file(interim_dir, "timeline_daily_aggregated_with_anchors_*.csv")
     
     if use_checkpoint and not force_recompute and checkpoint:
         print(f" Found checkpoint: {checkpoint.name}")
         print(f"  To recompute, use --force-recompute")
         return 0
     
-    # Step 1: Load timeline with offsets
+    # Step 1: Load timeline with offsets (with anchors)
     print("[Step 6.1] Loading timeline with offsets...")
-    timeline_file = find_latest_file(interim_dir, "timeline_with_offsets_*.csv")
+    timeline_file = find_latest_file(interim_dir, "timeline_with_offsets_with_anchors_*.csv")
     
     if not timeline_file:
         raise FileNotFoundError(
@@ -89,14 +89,61 @@ def main(
     print(f"  Users: {daily_agg['author'].nunique():,}")
     print(f"  Days per user: {len(daily_agg) / daily_agg['author'].nunique():.1f} (average)")
     
-    # Step 4: Save checkpoint
-    print("\n[Step 6.4] Saving checkpoint...")
+    # Step 4: Save checkpoint (with anchors)
+    print("\n[Step 6.4] Saving checkpoint (with anchors)...")
     output_file = save_with_timestamp(
         daily_agg,
         interim_dir,
-        "timeline_daily_aggregated"
+        "timeline_daily_aggregated_with_anchors"
     )
-    print(f"   Saved: {output_file.name}")
+    print(f"   Saved (with anchors): {output_file.name}")
+    
+    # Optional: aggregate timeline WITHOUT anchors if available
+    print("\n[Step 6.5] Aggregating timeline without anchors (if available)...")
+    timeline_no_anchors_file = find_latest_file(interim_dir, "timeline_with_offsets_no_anchors_*.csv")
+    
+    if timeline_no_anchors_file is None:
+        print("   No 'timeline_with_offsets_no_anchors_*.csv' file found; skipping no-anchors aggregation.")
+    else:
+        print(f"   Using timeline without anchors: {timeline_no_anchors_file.name}")
+        
+        timeline_no_anchors_df = pd.read_csv(
+            timeline_no_anchors_file,
+            encoding='utf-8-sig',
+            low_memory=False
+        )
+        print(f"   Loaded {len(timeline_no_anchors_df):,} posts from {timeline_no_anchors_file.name}")
+        print(f"  Users: {timeline_no_anchors_df['author'].nunique():,}")
+        
+        # Identify feature columns again (same logic)
+        print("\n[Step 6.5.1] Identifying feature columns for no-anchors timeline...")
+        feature_cols_no = identify_feature_columns(timeline_no_anchors_df, cfg)
+        print(f"   Found {len(feature_cols_no)} feature columns")
+        
+        if len(feature_cols_no) == 0:
+            raise ValueError("No feature columns found in no-anchors timeline")
+        
+        # Aggregate by day for no-anchors timeline
+        print("\n[Step 6.5.2] Aggregating posts by day (no anchors)...")
+        daily_agg_no = aggregate_all_features_by_day(
+            timeline_df=timeline_no_anchors_df,
+            feature_cols=feature_cols_no,
+            user_col='author',
+            time_col='offset_from_cd1',
+        )
+        print(f"   Aggregated to {len(daily_agg_no):,} (user, day) combinations (no anchors)")
+        print(f"\n Final (no anchors): {len(daily_agg_no):,} (user, day) combinations")
+        print(f"  Users: {daily_agg_no['author'].nunique():,}")
+        print(f"  Days per user: {len(daily_agg_no) / daily_agg_no['author'].nunique():.1f} (average)")
+        
+        # Save no-anchors aggregated timeline
+        print("\n[Step 6.5.3] Saving no-anchors checkpoint...")
+        output_file_no = save_with_timestamp(
+            daily_agg_no,
+            interim_dir,
+            "timeline_daily_aggregated_no_anchors"
+        )
+        print(f"   Saved (no anchors): {output_file_no.name}")
     
     return 0
 

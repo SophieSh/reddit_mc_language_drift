@@ -252,7 +252,7 @@ def extract_users_from_subreddits(
             df = pd.read_csv(posts_path, encoding="utf-8-sig", low_memory=False)
             print(f"    Loaded {len(df):,} posts")
             
-            # Filter by subreddit
+            # Filter by subreddit (case-sensitive matching)
             df = df[df["subreddit"].isin(target_subreddits)].copy()
             print(f"    Found {len(df):,} posts in target subreddits")
             
@@ -276,8 +276,8 @@ def extract_users_from_subreddits(
                 subreddit = data.get("subreddit")
                 author = data.get("author")
                 
-                # Filter by subreddit
-                if subreddit not in target_subreddits:
+                # Filter by subreddit (case-sensitive)
+                if subreddit is None or subreddit not in target_subreddits:
                     continue
                 
                 # Filter by users if provided

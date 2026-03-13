@@ -78,7 +78,7 @@ analysis:
   interpolation: linear  # "linear", "cubic", "quadratic" (future: support scipy methods)
 
 drift:
-  cycle_days_range: [24, 35]
+  cycle_days_range: [21, 35]
 
 # Pattern source mapping (which moon file each pattern comes from)
 pattern_sources:

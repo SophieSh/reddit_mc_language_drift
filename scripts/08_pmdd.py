@@ -143,16 +143,20 @@ def main(
     mental_health_subreddits = set(cfg["subreddits"]["mental_health"])
     depression_subreddits = set(cfg["subreddits"]["depression"])
     suicide_subreddits = set(cfg["subreddits"]["suicide"])
+    adhd_subreddits = set(cfg["subreddits"]["adhd"])
     
     print(f"  Mental health subreddits: {', '.join(sorted(mental_health_subreddits))}")
+    print(f"  ADHD subreddits: {', '.join(sorted(adhd_subreddits))}")
     
     # Create a DataFrame with target users for filtering (all_cycle_users = pmdd_users | control_users)
     target_users_df = pd.DataFrame({"user": list(all_cycle_users)})
     
-    # Extract all mental health posts from moon1/moon2 (all time), filtered to our target users
+    # Extract all mental health posts (including ADHD) from moon1/moon2 (all time), filtered to our target users
+    # Combine mental_health_subreddits with adhd_subreddits for extraction
+    all_subreddits_for_extraction = mental_health_subreddits | adhd_subreddits
     all_mh_posts_df = extract_users_from_subreddits(
         posts_files=existing_posts_files,
-        target_subreddits=mental_health_subreddits,
+        target_subreddits=all_subreddits_for_extraction,
         user_db_or_path=target_users_df,
         progress_interval=2_000_000,
     )
@@ -169,12 +173,15 @@ def main(
         pmdd_mh_posts = all_mh_posts_df[all_mh_posts_df["author"].astype(str).isin(pmdd_users)].copy()
         control_mh_posts = all_mh_posts_df[all_mh_posts_df["author"].astype(str).isin(control_users)].copy()
         
-        # Count unique users by subreddit type
+        # Count unique users by subreddit type (case-sensitive matching)
         pmdd_depression_users_alltime = set(pmdd_mh_posts[
             pmdd_mh_posts["subreddit"].isin(depression_subreddits)
         ]["author"].astype(str).unique())
         pmdd_suicide_users_alltime = set(pmdd_mh_posts[
             pmdd_mh_posts["subreddit"].isin(suicide_subreddits)
+        ]["author"].astype(str).unique())
+        pmdd_adhd_users_alltime = set(pmdd_mh_posts[
+            pmdd_mh_posts["subreddit"].isin(adhd_subreddits)
         ]["author"].astype(str).unique())
         
         control_depression_users_alltime = set(control_mh_posts[
@@ -183,14 +190,19 @@ def main(
         control_suicide_users_alltime = set(control_mh_posts[
             control_mh_posts["subreddit"].isin(suicide_subreddits)
         ]["author"].astype(str).unique())
+        control_adhd_users_alltime = set(control_mh_posts[
+            control_mh_posts["subreddit"].isin(adhd_subreddits)
+        ]["author"].astype(str).unique())
         
         print("\n  All-time posting statistics (from moon1/moon2 files):")
         print(f"    PMDD users:")
         print(f"      Ever posted in depression subreddits: {len(pmdd_depression_users_alltime):,} / {len(pmdd_users):,} ({100*len(pmdd_depression_users_alltime)/len(pmdd_users):.1f}%)")
         print(f"      Ever posted in suicide subreddits: {len(pmdd_suicide_users_alltime):,} / {len(pmdd_users):,} ({100*len(pmdd_suicide_users_alltime)/len(pmdd_users):.1f}%)")
+        print(f"      Ever posted in ADHD subreddits: {len(pmdd_adhd_users_alltime):,} / {len(pmdd_users):,} ({100*len(pmdd_adhd_users_alltime)/len(pmdd_users):.1f}%)")
         print(f"    Control users:")
         print(f"      Ever posted in depression subreddits: {len(control_depression_users_alltime):,} / {len(control_users):,} ({100*len(control_depression_users_alltime)/len(control_users):.1f}%)")
         print(f"      Ever posted in suicide subreddits: {len(control_suicide_users_alltime):,} / {len(control_users):,} ({100*len(control_suicide_users_alltime)/len(control_users):.1f}%)")
+        print(f"      Ever posted in ADHD subreddits: {len(control_adhd_users_alltime):,} / {len(control_users):,} ({100*len(control_adhd_users_alltime)/len(control_users):.1f}%)")
     else:
         print("  WARNING: No mental health posts found, skipping statistics.")
     
@@ -200,10 +212,14 @@ def main(
     print("\n[Step 5/9] Loading timeline and filtering to mental health posts...")
     
     if timeline_dir is None:
-        timeline_dir = analysis_dir
+        timeline_dir = interim_dir  # Use interim_dir instead of analysis_dir for new pipeline
     
-    # Look for pattern_1 timeline files first, fallback to any timeline
-    timeline_path = find_latest_file(timeline_dir, "timeline_pattern1_*.csv")
+    # Look for new pipeline timeline files WITH ANCHORS (required)
+    # Priority: 1) with_anchors (required), 2) old pattern files for backwards compatibility
+    timeline_path = find_latest_file(timeline_dir, "timeline_with_offsets_with_anchors_*.csv")
+    # Backwards compatibility: old pattern files (these typically include anchors)
+    if timeline_path is None:
+        timeline_path = find_latest_file(timeline_dir, "timeline_pattern1_*.csv")
     if timeline_path is None:
         timeline_path = find_latest_file(timeline_dir, "timeline_*.csv")
     
@@ -246,12 +262,14 @@ def main(
         offset_col="offset_from_cd1",
     )
     
-    # Filter timeline to only mental health posts
+    # Filter timeline to only mental health posts (including ADHD)
     if "subreddit" not in timeline_df.columns:
         print("  ERROR: Timeline missing 'subreddit' column.")
         return
     
-    mental_health_df = timeline_df[timeline_df["subreddit"].isin(mental_health_subreddits)].copy()
+    # Include both mental health and ADHD subreddits for timeline filtering
+    all_subreddits_for_timeline = mental_health_subreddits | adhd_subreddits
+    mental_health_df = timeline_df[timeline_df["subreddit"].isin(all_subreddits_for_timeline)].copy()
     print(f"  Found {len(mental_health_df):,} mental health posts in timeline")
     
     pmdd_mental_health_df = mental_health_df[
@@ -360,6 +378,7 @@ def main(
     
     suicide_subreddits = set(cfg["subreddits"]["suicide"])
     depression_subreddits = set(cfg["subreddits"]["depression"])
+    adhd_subreddits = set(cfg["subreddits"]["adhd"])
     
     pmdd_stats = calculate_phase_statistics(
         pmdd_mental_health_df,
@@ -368,6 +387,7 @@ def main(
         user_col=user_col,
         suicide_subreddits=suicide_subreddits,
         depression_subreddits=depression_subreddits,
+        adhd_subreddits=adhd_subreddits,
     )
     control_stats = calculate_phase_statistics(
         control_mental_health_df,
@@ -376,6 +396,7 @@ def main(
         user_col=user_col,
         suicide_subreddits=suicide_subreddits,
         depression_subreddits=depression_subreddits,
+        adhd_subreddits=adhd_subreddits,
     )
     
     # Combine into final table
@@ -385,10 +406,10 @@ def main(
         # Reorder columns
         stats_table = stats_table[[
             "group", "phase", 
-            "suicide_volume", "depression_volume",
-            "suicide_raw", "depression_raw",
-            "n_users", "n_users_suicide", "n_users_depression",
-            "suicide_zscore", "depression_zscore"
+            "suicide_volume", "depression_volume", "adhd_volume",
+            "suicide_raw", "depression_raw", "adhd_raw",
+            "n_users", "n_users_suicide", "n_users_depression", "n_users_adhd",
+            "suicide_zscore", "depression_zscore", "adhd_zscore"
         ]]
         
         print(f"  Created statistics table: {len(stats_table)} rows × {len(stats_table.columns)} columns")

@@ -1432,11 +1432,12 @@ def calculate_phase_statistics(
     user_col: str = "author",
     suicide_subreddits: set[str] | None = None,
     depression_subreddits: set[str] | None = None,
+    adhd_subreddits: set[str] | None = None,
 ) -> pd.DataFrame:
     """Calculate posting volume by phase with cycle-length and z-score normalization.
     
     For each woman:
-    1. Count posts per phase (separate suicide and depression)
+    1. Count posts per phase (separate suicide, depression, and ADHD)
     2. Normalize for cycle length (divide by phase length in days)
     3. Z-score normalize per woman (across 4 phases)
     
@@ -1449,11 +1450,12 @@ def calculate_phase_statistics(
         user_col: Column name for user identifier (default: "author")
         suicide_subreddits: Set of suicide subreddit names (default: None, uses empty set)
         depression_subreddits: Set of depression subreddit names (default: None, uses empty set)
+        adhd_subreddits: Set of ADHD subreddit names (default: None, uses empty set)
     
     Returns:
-        DataFrame with columns: group, phase, suicide_volume, depression_volume,
-        suicide_raw, depression_raw, suicide_zscore, depression_zscore,
-        n_users, n_users_suicide, n_users_depression
+        DataFrame with columns: group, phase, suicide_volume, depression_volume, adhd_volume,
+        suicide_raw, depression_raw, adhd_raw, suicide_zscore, depression_zscore, adhd_zscore,
+        n_users, n_users_suicide, n_users_depression, n_users_adhd
     """
     df = df.copy()
     
@@ -1461,20 +1463,24 @@ def calculate_phase_statistics(
         suicide_subreddits = set()
     if depression_subreddits is None:
         depression_subreddits = set()
+    if adhd_subreddits is None:
+        adhd_subreddits = set()
     
     # Filter to posts with assigned phases
     df = df[df["phase"].notna()].copy()
     if len(df) == 0:
         return pd.DataFrame()
     
-    # Classify posts by subreddit type
+    # Classify posts by subreddit type (case-sensitive matching)
     df["is_suicide"] = df["subreddit"].isin(suicide_subreddits)
     df["is_depression"] = df["subreddit"].isin(depression_subreddits)
+    df["is_adhd"] = df["subreddit"].isin(adhd_subreddits)
     
-    # Identify users who posted in suicide/depression subreddits within timeline window
+    # Identify users who posted in suicide/depression/ADHD subreddits within timeline window
     # (used for z-score aggregation - include all these users even if 0 posts in a specific phase)
     users_with_suicide_posts = set(df[df["is_suicide"]][user_col].astype(str).unique())
     users_with_depression_posts = set(df[df["is_depression"]][user_col].astype(str).unique())
+    users_with_adhd_posts = set(df[df["is_adhd"]][user_col].astype(str).unique())
     
     # Create lookup dict for phase lengths: {user: {phase: length}}
     user_phase_lengths = {}
@@ -1505,6 +1511,7 @@ def calculate_phase_statistics(
             phase_df = user_df[user_df["phase"] == phase]
             suicide_posts = phase_df["is_suicide"].sum()
             depression_posts = phase_df["is_depression"].sum()
+            adhd_posts = phase_df["is_adhd"].sum()
             
             phase_length = user_phase_lengths[user_str][phase]
             
@@ -1513,9 +1520,11 @@ def calculate_phase_statistics(
                 "phase": phase,
                 "suicide_posts": suicide_posts,
                 "depression_posts": depression_posts,
+                "adhd_posts": adhd_posts,
                 "phase_length": phase_length,
                 "suicide_volume": suicide_posts / phase_length if phase_length > 0 else 0,
                 "depression_volume": depression_posts / phase_length if phase_length > 0 else 0,
+                "adhd_volume": adhd_posts / phase_length if phase_length > 0 else 0,
             })
     
     counts_df = pd.DataFrame(user_phase_counts)
@@ -1532,6 +1541,8 @@ def calculate_phase_statistics(
         suicide_std = user_df["suicide_volume"].std()
         depression_mean = user_df["depression_volume"].mean()
         depression_std = user_df["depression_volume"].std()
+        adhd_mean = user_df["adhd_volume"].mean()
+        adhd_std = user_df["adhd_volume"].std()
         
         # Handle division by zero (if all phases have same rate for a user) - match old script
         # Set std to 1.0 if < 1e-10, then calculate z-score normally
@@ -1539,9 +1550,12 @@ def calculate_phase_statistics(
             suicide_std = 1.0
         if depression_std < 1e-10:
             depression_std = 1.0
+        if adhd_std < 1e-10:
+            adhd_std = 1.0
         
         user_df["suicide_zscore"] = (user_df["suicide_volume"] - suicide_mean) / suicide_std
         user_df["depression_zscore"] = (user_df["depression_volume"] - depression_mean) / depression_std
+        user_df["adhd_zscore"] = (user_df["adhd_volume"] - adhd_mean) / adhd_std
         
         zscore_df.append(user_df)
     
@@ -1567,12 +1581,17 @@ def calculate_phase_statistics(
         depression_posts_in_phase = phase_posts[phase_posts["is_depression"]]
         n_users_depression = len(depression_posts_in_phase[user_col].unique()) if len(depression_posts_in_phase) > 0 else 0
         
+        # Count users who posted in ADHD subreddits in this phase
+        adhd_posts_in_phase = phase_posts[phase_posts["is_adhd"]]
+        n_users_adhd = len(adhd_posts_in_phase[user_col].unique()) if len(adhd_posts_in_phase) > 0 else 0
+        
         # For volume calculations, only include users who posted
         phase_df_with_posts = phase_df[
-            (phase_df["suicide_posts"] > 0) | (phase_df["depression_posts"] > 0)
+            (phase_df["suicide_posts"] > 0) | (phase_df["depression_posts"] > 0) | (phase_df["adhd_posts"] > 0)
         ]
         suicide_volume_mean = phase_df_with_posts["suicide_volume"].mean() if len(phase_df_with_posts) > 0 else 0.0
         depression_volume_mean = phase_df_with_posts["depression_volume"].mean() if len(phase_df_with_posts) > 0 else 0.0
+        adhd_volume_mean = phase_df_with_posts["adhd_volume"].mean() if len(phase_df_with_posts) > 0 else 0.0
         
         # For z-score, calculate separately for suicide and depression (like old script)
         # Suicide z-score: include ALL users who posted in suicide subreddits (within timeline window)
@@ -1591,18 +1610,30 @@ def calculate_phase_statistics(
         else:
             depression_zscore_mean = 0.0
         
+        # ADHD z-score: include ALL users who posted in ADHD subreddits (within timeline window)
+        # even if they have 0 posts in this specific phase
+        adhd_users_in_phase = phase_df[phase_df["user"].astype(str).isin(users_with_adhd_posts)]
+        if len(adhd_users_in_phase) > 0:
+            adhd_zscore_mean = adhd_users_in_phase["adhd_zscore"].mean()
+        else:
+            adhd_zscore_mean = 0.0
+        
         phase_stats.append({
             "group": group_name,
             "phase": phase,
             "suicide_volume": suicide_volume_mean,
             "depression_volume": depression_volume_mean,
+            "adhd_volume": adhd_volume_mean,
             "suicide_raw": phase_df["suicide_posts"].sum(),
             "depression_raw": phase_df["depression_posts"].sum(),
+            "adhd_raw": phase_df["adhd_posts"].sum(),
             "suicide_zscore": suicide_zscore_mean,
             "depression_zscore": depression_zscore_mean,
+            "adhd_zscore": adhd_zscore_mean,
             "n_users": n_users_total,
             "n_users_suicide": n_users_suicide,
             "n_users_depression": n_users_depression,
+            "n_users_adhd": n_users_adhd,
         })
     
     return pd.DataFrame(phase_stats)

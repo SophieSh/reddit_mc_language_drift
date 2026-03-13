@@ -52,17 +52,17 @@ def main(
         print(f"  Time window: ±{window_months} months")
     print()
     
-    # Check for checkpoint
-    checkpoint = find_latest_file(interim_dir, "timeline_with_offsets_*.csv")
+    # Check for checkpoint (with anchors timeline)
+    checkpoint = find_latest_file(interim_dir, "timeline_with_offsets_with_anchors_*.csv")
     
     if use_checkpoint and not force_recompute and checkpoint:
         print(f" Found checkpoint: {checkpoint.name}")
         print(f"  To recompute, use --force-recompute")
         return 0
     
-    # Step 1: Load preprocessed posts
+    # Step 1: Load preprocessed posts (with anchors)
     print("[Step 5.1] Loading preprocessed posts...")
-    posts_file = find_latest_file(interim_dir, "posts_all_users_preprocessed_*.csv")
+    posts_file = find_latest_file(interim_dir, "posts_all_users_preprocessed_with_anchors_*.csv")
     
     if not posts_file:
         raise FileNotFoundError(
@@ -110,18 +110,18 @@ def main(
     timeline_df = timeline_df[timeline_df['offset_from_cd1'].notna()].copy()
     
     # Step 5: Time window filtering (applied by default to match old working version)
-    print(f"\n[Step 5.5] Filtering to ±{window_months} months around anchor...")
-    from src.config import AVG_DAYS_PER_MONTH
-    from src.preprocess import filter_posts_by_anchor_window
-    
-    before = len(timeline_df)
-    timeline_df = filter_posts_by_anchor_window(
-        timeline_df,
-        users_df,
-        window_months=window_months,
-        user_col='author'
-    )
-    after = len(timeline_df)
+        print(f"\n[Step 5.5] Filtering to ±{window_months} months around anchor...")
+        from src.config import AVG_DAYS_PER_MONTH
+        from src.preprocess import filter_posts_by_anchor_window
+        
+        before = len(timeline_df)
+        timeline_df = filter_posts_by_anchor_window(
+            timeline_df,
+            users_df,
+            window_months=window_months,
+            user_col='author'
+        )
+        after = len(timeline_df)
     print(f"   Filtered to {after:,} posts (from {before:,})")
     
     print(f"\n Final timeline: {len(timeline_df):,} posts from {timeline_df['author'].nunique():,} users")
@@ -131,7 +131,7 @@ def main(
     output_file = save_with_timestamp(
         timeline_df,
         interim_dir,
-        "timeline_with_offsets"
+        "timeline_with_offsets_with_anchors"
     )
     print(f"   Saved (with anchors): {output_file.name}")
     
