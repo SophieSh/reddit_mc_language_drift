@@ -110,18 +110,18 @@ def main(
     timeline_df = timeline_df[timeline_df['offset_from_cd1'].notna()].copy()
     
     # Step 5: Time window filtering (applied by default to match old working version)
-        print(f"\n[Step 5.5] Filtering to ±{window_months} months around anchor...")
-        from src.config import AVG_DAYS_PER_MONTH
-        from src.preprocess import filter_posts_by_anchor_window
-        
-        before = len(timeline_df)
-        timeline_df = filter_posts_by_anchor_window(
-            timeline_df,
-            users_df,
-            window_months=window_months,
-            user_col='author'
-        )
-        after = len(timeline_df)
+    print(f"\n[Step 5.5] Filtering to ±{window_months} months around anchor...")
+    from src.config import AVG_DAYS_PER_MONTH
+    from src.preprocess import filter_posts_by_anchor_window
+
+    before = len(timeline_df)
+    timeline_df = filter_posts_by_anchor_window(
+        timeline_df,
+        users_df,
+        window_months=window_months,
+        user_col='author'
+    )
+    after = len(timeline_df)
     print(f"   Filtered to {after:,} posts (from {before:,})")
     
     print(f"\n Final timeline: {len(timeline_df):,} posts from {timeline_df['author'].nunique():,} users")
