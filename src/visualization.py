@@ -1,6 +1,7 @@
 """Visualization functions for periodicity analysis."""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -63,6 +64,79 @@ def create_adaptive_phases(cycle_length: float, split_luteal: bool = False) -> d
         phases['Luteal'] = (luteal_start, luteal_end)
     
     return phases
+
+
+def create_pmdd_phases(cycle_length: float) -> dict[str, tuple[int, int]]:
+    """Create 5-phase PMDD-specific phase definitions (Eisenlohr-Moul et al., AJP 2023).
+
+    Anchored to both menses (CD1) and estimated ovulation (cycle_length - 14).
+    Gap days not in any phase are excluded from analysis.
+
+    Phase boundaries (0-indexed offset_from_cd1):
+      Perimenstrual:  (-3, +2)  — wraps around CD1 (sentinel: negative start)
+      Midfollicular:  (max(ov-7, 3), ov-3)
+      Periovulatory:  (ov-2, ov+1)
+      Early Luteal:   (ov+2, min(ov+5, cl-10))  — capped to avoid overlap with Midluteal
+      Midluteal:      (cl-9, cl-5)
+
+    where ov = cycle_length - 14 (fixed luteal-phase assumption), cl = cycle_length.
+
+    Perimenstrual wrap encoding: start=-3 is a sentinel meaning the phase spans
+    (cl-3 ... cl-1, 0 ... 2). Use assign_pmdd_phase() to handle this correctly.
+
+    Args:
+        cycle_length: Detected cycle length in days.
+
+    Returns:
+        Ordered dict of {phase_name: (start, end)} with negative start for wrap-around.
+    """
+    cl = int(round(cycle_length))
+    ov = cl - 14  # estimated ovulation day
+
+    if ov < 10:
+        logging.warning(
+            f"create_pmdd_phases: very short cycle ({cl} days) → "
+            f"ovulation day {ov} is very early; phases may be compressed."
+        )
+
+    el_end = min(ov + 5, cl - 10)
+
+    return {
+        "Perimenstrual": (-3, 2),
+        "Midfollicular": (max(ov - 7, 3), ov - 3),
+        "Periovulatory": (ov - 2, ov + 1),
+        "Early Luteal":  (ov + 2, el_end),
+        "Midluteal":     (cl - 9, cl - 5),
+    }
+
+
+def assign_pmdd_phase(
+    offset_mod: float,
+    phases: dict[str, tuple[int, int]],
+    cycle_length: float,
+) -> str | None:
+    """Assign a PMDD phase to a (modulo-normalised) cycle-day offset.
+
+    Handles the Perimenstrual wrap-around: a negative start is a sentinel
+    meaning the phase spans (cl+start ... cl-1) ∪ (0 ... end).
+
+    Args:
+        offset_mod: offset_from_cd1 % cycle_length  (already in [0, cl)).
+        phases: Phase dict from create_pmdd_phases().
+        cycle_length: Cycle length in days (same value used to build phases).
+
+    Returns:
+        Phase name, or None if the day falls in a gap.
+    """
+    cl = int(round(cycle_length))
+    for phase_name, (start, end) in phases.items():
+        if start < 0:  # wrap-around (Perimenstrual)
+            if offset_mod >= cl + start or offset_mod <= end:
+                return phase_name
+        else:
+            if start <= offset_mod <= end:
+                return phase_name
+    return None  # gap day — excluded from analysis
 
 
 def assign_phase_to_day(day: float, phase_definition: dict[str, tuple[int, int]]) -> str | None:
