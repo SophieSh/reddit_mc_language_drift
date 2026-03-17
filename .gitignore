@@ -2,6 +2,11 @@ __pycache__/
 *.py[cod]
 .ipynb_checkpoints/
 .DS_Store
+
+# AI/Editor configurations
+CLAUDE.md
+.cursorrules
+.claude/
 .cursor/
 
 # Environment files
@@ -24,3 +29,5 @@ reports/
 
 # Old/exploratory code
 code_first_attemps/
+data/
+reports/
