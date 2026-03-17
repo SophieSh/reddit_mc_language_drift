@@ -75,6 +75,7 @@ from sklearn.metrics import (
     confusion_matrix,
 )
 from sklearn.base import clone
+from sklearn.feature_selection import f_classif
 from sklearn.model_selection import GroupKFold
 from sklearn.preprocessing import LabelEncoder
 from sklearn.tree import DecisionTreeClassifier, plot_tree
@@ -106,18 +107,27 @@ PHASE_ORDER = ["Menstrual", "Follicular", "Ovulation", "Luteal"]
 # 1. DATA LOADING
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def load_daily_aggregated(interim_dir: Path) -> pd.DataFrame:
+def load_daily_aggregated(interim_dir: Path, anchors: str = "with") -> pd.DataFrame:
     """Load the daily-aggregated timeline produced by step 06.
 
     Row unit: ONE (user, cycle_day) pair.
     Columns include {feature}_mean and {feature}_zscore (per-user z-scores).
 
-    Why step 06 and not step 05?
-    Step 05 has individual posts; step 06 averages all posts per user-day.
-    The phase is a day-level construct (offset_from_cd1 maps to exactly one
-    phase per user-day), so the daily aggregate is the correct ML sample unit.
+    Args:
+        anchors: "with" to prefer timeline_daily_aggregated_with_anchors_*.csv,
+                 "without" to prefer the no_anchors variant,
+                 "any" to pick latest regardless of name.
     """
-    path = find_latest_file(interim_dir, "timeline_daily_aggregated_*.csv")
+    pattern_map = {
+        "with": "timeline_daily_aggregated_with_anchors_*.csv",
+        "without": "timeline_daily_aggregated_no_anchors_*.csv",
+        "any": "timeline_daily_aggregated_*.csv",
+    }
+    pattern = pattern_map.get(anchors, pattern_map["with"])
+    path = find_latest_file(interim_dir, pattern)
+    # Fallback: try generic pattern if specific variant not found
+    if path is None and anchors != "any":
+        path = find_latest_file(interim_dir, "timeline_daily_aggregated_*.csv")
     if path is None:
         raise FileNotFoundError(
             "No timeline_daily_aggregated_*.csv found in data/interim/. "
@@ -129,12 +139,17 @@ def load_daily_aggregated(interim_dir: Path) -> pd.DataFrame:
     return df
 
 
-def build_user_period_map(interim_dir: Path) -> dict[str, float]:
+def build_user_period_map(interim_dir: Path, min_consensus_features: int = 0) -> dict[str, float]:
     """Build {user → cycle_length_days} strictly from step-07 periodicity results.
 
     Only users with a DETECTED (statistically significant) period are included.
     Users without a detected period are excluded — their phase labels would be
     unreliable guesses based on an assumed cycle length.
+
+    Args:
+        min_consensus_features: If > 0 and the file has an 'n_features_agreeing'
+            column, keep only users where that many features agreed on the period.
+            Higher values → fewer but more reliable users.
 
     Source preference:
       1. consensus_periods_*.csv  with 'consensus_period' column
@@ -150,6 +165,13 @@ def build_user_period_map(interim_dir: Path) -> dict[str, float]:
     # Case 1: consensus file with a single period per user
     if "consensus_period" in pdf.columns and "user" in pdf.columns:
         valid = pdf[pdf["consensus_period"].notna()].copy()
+        if min_consensus_features > 0 and "n_features_agreeing" in valid.columns:
+            before = len(valid)
+            valid = valid[valid["n_features_agreeing"] >= min_consensus_features]
+            logging.info(
+                f"  Strict consensus filter (n_features_agreeing >= {min_consensus_features}): "
+                f"{before:,} → {len(valid):,} users"
+            )
         user_period_map = dict(
             zip(valid["user"].astype(str), valid["consensus_period"].astype(float))
         )
@@ -173,7 +195,11 @@ def build_user_period_map(interim_dir: Path) -> dict[str, float]:
 # 2. PHASE LABELLING
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def label_days_with_phase(df: pd.DataFrame, user_period_map: dict[str, float]) -> pd.DataFrame:
+def label_days_with_phase(
+    df: pd.DataFrame,
+    user_period_map: dict[str, float],
+    max_offset: int = 0,
+) -> pd.DataFrame:
     """Filter to detected-period users and label each user-day with its phase.
 
     Uses the project's existing adaptive-phase logic so that boundaries are
@@ -183,6 +209,9 @@ def label_days_with_phase(df: pd.DataFrame, user_period_map: dict[str, float]) -
     Args:
         df: Daily-aggregated DataFrame with 'author' and 'offset_from_cd1'.
         user_period_map: {user → cycle_length_days} for detected-period users.
+        max_offset: If > 0, keep only days where |offset_from_cd1| <= max_offset.
+            Restricting to e.g. ±60 days of the anchor post reduces cumulative
+            cycle drift and makes phase labels much more accurate.
     """
     if not user_period_map:
         raise RuntimeError(
@@ -197,8 +226,18 @@ def label_days_with_phase(df: pd.DataFrame, user_period_map: dict[str, float]) -
         f"{len(df):,} user-days, {df['author'].nunique():,} users"
     )
 
+    # Restrict time window to reduce phase-label drift
+    if max_offset > 0:
+        before = len(df)
+        df = df[df["offset_from_cd1"].abs() <= max_offset].copy()
+        logging.info(
+            f"  Time window filter (|offset| <= {max_offset} days): "
+            f"{before:,} → {len(df):,} user-days"
+        )
+
     # Pre-compute per-user adaptive phase boundaries (4 rows per user)
-    user_phase_df = compute_user_phase_definitions(user_period_map)
+    user_period_map_filtered = {u: p for u, p in user_period_map.items() if u in set(df["author"])}
+    user_phase_df = compute_user_phase_definitions(user_period_map_filtered)
 
     # Vectorised phase assignment using offset_from_cd1
     df = assign_phases_to_timeline(
@@ -252,18 +291,76 @@ def compute_and_select_zscore_features(df: pd.DataFrame) -> tuple[pd.DataFrame, 
     return df, zscore_cols
 
 
+def select_top_features_by_anova(
+    df: pd.DataFrame,
+    zscore_cols: list[str],
+    n_features: int,
+    binary_phase: str = "",
+) -> list[str]:
+    """Rank features by F-statistic and return top N.
+
+    When binary_phase is set, uses a binary t-test (target phase vs rest)
+    so that features are ranked specifically for discriminating that phase —
+    not diluted by how well they separate the other three phases from each other.
+
+    When binary_phase is empty, uses one-way ANOVA across all 4 phases.
+
+    NaN values are imputed with 0 (= user's personal mean) before scoring.
+    Features with zero variance are assigned F=0 and ranked last.
+    """
+    if n_features <= 0 or n_features >= len(zscore_cols):
+        logging.info(f"  Keeping all {len(zscore_cols)} features (n_features={n_features})")
+        return zscore_cols
+
+    X = df[zscore_cols].fillna(0).values.astype(np.float32)
+
+    if binary_phase:
+        y_sel = (df["phase"] == binary_phase).astype(int).values
+        label_desc = f"binary ({binary_phase} vs rest)"
+    else:
+        y_sel = LabelEncoder().fit_transform(df["phase"])
+        label_desc = "4-class ANOVA"
+
+    f_stats, _ = f_classif(X, y_sel)
+    f_stats = np.nan_to_num(f_stats, nan=0.0)
+
+    ranked = sorted(zip(zscore_cols, f_stats), key=lambda t: t[1], reverse=True)
+    selected = [col for col, _ in ranked[:n_features]]
+
+    logging.info(f"\n  Top {n_features} features by {label_desc} F-statistic:")
+    for col, f in ranked[:n_features]:
+        logging.info(f"    {f:8.2f}  {col}")
+
+    return selected
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 4. ML ARRAYS AND GROUP-AWARE CV
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def make_arrays(df: pd.DataFrame, feature_cols: list[str]):
-    """Extract X, y (int-encoded), groups, and the LabelEncoder."""
-    # Fill NaN with 0 — z-score of 0 means "at the user's personal mean", safe imputation
+def make_arrays(df: pd.DataFrame, feature_cols: list[str], binary_phase: str = ""):
+    """Extract X, y (int-encoded), groups, and the LabelEncoder.
+
+    Args:
+        binary_phase: If non-empty (e.g. "Menstrual"), collapse labels to
+            1 = target phase, 0 = all other phases.  The label encoder will
+            have classes ["Other", binary_phase] so class 1 is always the target.
+    """
     X = df[feature_cols].fillna(0).values.astype(np.float32)
 
-    le = LabelEncoder()
-    le.fit(PHASE_ORDER)   # fixed order for stable class indices across runs
-    y = le.transform(df["phase"])
+    if binary_phase:
+        binary_labels = df["phase"].apply(lambda p: binary_phase if p == binary_phase else "Other")
+        le = LabelEncoder()
+        le.fit(["Other", binary_phase])   # 0=Other, 1=target
+        y = le.transform(binary_labels)
+        logging.info(
+            f"  Binary mode: '{binary_phase}' (1) vs rest (0) — "
+            f"positives: {y.sum():,} / {len(y):,} ({100*y.mean():.1f}%)"
+        )
+    else:
+        le = LabelEncoder()
+        le.fit(PHASE_ORDER)
+        y = le.transform(df["phase"])
 
     groups = df["author"].values
     return X, y, groups, le
@@ -516,11 +613,38 @@ def _macro_f1(y_true, y_pred) -> float:
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", default="configs/base.yaml")
-    p.add_argument("--tree-depth", type=int, default=4, choices=[3, 4, 5])
+    p.add_argument("--tree-depth", type=int, default=4, choices=[3, 4, 5, 6, 7])
+    p.add_argument(
+        "--n-features", type=int, default=20,
+        help="Select top N features by ANOVA F-statistic before training. 0 = use all.",
+    )
     p.add_argument("--n-folds", type=int, default=5,
                    help="GroupKFold splits — each fold holds out all days of some users.")
     p.add_argument("--shap-max-display", type=int, default=20)
     p.add_argument("--skip-shap", action="store_true")
+    p.add_argument(
+        "--anchors",
+        choices=["with", "without", "any"],
+        default="with",
+        help="Which timeline variant to use: 'with' (with_anchors, default), 'without' (no_anchors), or 'any' (latest).",
+    )
+    p.add_argument(
+        "--max-offset", type=int, default=0,
+        help="Keep only days within ±N days of the anchor post. 0 = no limit. "
+             "Recommended: 60 (2 cycles) or 30 (1 cycle) to reduce phase-label drift.",
+    )
+    p.add_argument(
+        "--min-consensus-features", type=int, default=0,
+        help="Keep only consensus users where n_features_agreeing >= N. "
+             "0 = keep all. Try 40 for stricter, more reliable cycle lengths.",
+    )
+    p.add_argument(
+        "--binary-phase",
+        choices=["", "Menstrual", "Follicular", "Ovulation", "Luteal"],
+        default="",
+        help="If set, train a binary classifier: target phase vs all others. "
+             "Recommended: 'Menstrual' or 'Ovulation'.",
+    )
     p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args()
 
@@ -542,11 +666,11 @@ def main():
 
     # ── [1] Load daily aggregated timeline (step 06) ───────────────────────────
     logging.info("\n[1/7] Loading daily aggregated timeline (step 06)…")
-    df = load_daily_aggregated(interim_dir)
+    df = load_daily_aggregated(interim_dir, anchors=args.anchors)
 
     # ── [2] Build user → period map (step 07, detected users only) ─────────────
     logging.info("\n[2/7] Loading detected cycle lengths (step 07)…")
-    user_period_map = build_user_period_map(interim_dir)
+    user_period_map = build_user_period_map(interim_dir, min_consensus_features=args.min_consensus_features)
     if not user_period_map:
         logging.error("No periodicity results found. Run scripts/07_run_fft_analysis.py first.")
         sys.exit(1)
@@ -557,9 +681,9 @@ def main():
     logging.info("\n[3/7] Computing per-user z-score features from _mean columns…")
     df, zscore_cols = compute_and_select_zscore_features(df)
 
-    # ── [4] Filter to detected users and assign phase per user-day ─────────────
+    # ── [4] Filter to detected users, apply time window, assign phase ───────────
     logging.info("\n[4/7] Filtering to detected-period users and assigning phases…")
-    df = label_days_with_phase(df, user_period_map)
+    df = label_days_with_phase(df, user_period_map, max_offset=args.max_offset)
 
     # ── [5] Save labelled daily dataset ────────────────────────────────────────
     logging.info("\n[5/7] Saving labelled user-day dataset…")
@@ -574,8 +698,14 @@ def main():
     )
     logging.info(f"  Saved → {saved_path}")
 
+    # ── Feature selection by ANOVA F-statistic ──────────────────────────────────
+    logging.info(f"\n  Selecting top {args.n_features} features…")
+    selected_features = select_top_features_by_anova(
+        df, zscore_cols, args.n_features, binary_phase=args.binary_phase
+    )
+
     # ── Build ML arrays ─────────────────────────────────────────────────────────
-    X, y, groups, label_encoder = make_arrays(df, zscore_cols)
+    X, y, groups, label_encoder = make_arrays(df, selected_features, binary_phase=args.binary_phase)
     n_unique_users = len(np.unique(groups))
     median_days = int(np.median(np.unique(groups, return_counts=True)[1]))
     logging.info(
@@ -590,20 +720,20 @@ def main():
     # ── [6] Model 1 — Decision Tree ────────────────────────────────────────────
     logging.info("\n[6/7] Decision Tree baseline…")
     train_and_evaluate_tree(
-        X, y, groups, zscore_cols, label_encoder,
+        X, y, groups, selected_features, label_encoder,
         args.n_folds, args.tree_depth, output_dir, timestamp,
     )
 
     # ── [7] Model 2 — Ensemble + SHAP ──────────────────────────────────────────
     logging.info("\n[7/7] Ensemble model…")
     ensemble = train_and_evaluate_ensemble(
-        X, y, groups, zscore_cols, label_encoder,
+        X, y, groups, selected_features, label_encoder,
         args.n_folds, output_dir, timestamp,
     )
 
     if not args.skip_shap:
         run_shap_analysis(
-            ensemble, X, zscore_cols, label_encoder,
+            ensemble, X, selected_features, label_encoder,
             output_dir, timestamp, args.shap_max_display,
         )
     else:

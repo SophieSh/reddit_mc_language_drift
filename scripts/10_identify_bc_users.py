@@ -2,9 +2,9 @@
 """Step 10: Identify users who use/started/stopped birth control pills.
 
 Two-stage pipeline:
-  1. Regex: broadly match any mention of BC pills or pill brand names.
-  2. LLM (local Llama via ollama): classify the user's relationship to BC pills
-     AND extract timing information (when they started/stopped).
+  1. Regex: label-specific patterns for STARTED / STOPPED / STABLE_USING.
+     Each pattern is precise enough to use without LLM (--no-llm flag).
+  2. LLM (local Llama via ollama): re-classify or verify ambiguous cases.
 
 Labels:
   STARTED      - user started BC pills (recently or at a stated point in time)
@@ -14,16 +14,16 @@ Labels:
                  considering, afraid, general question, etc.)
 
 Output columns designed for before/after analysis:
-  author, offset_from_cd1, matched_term, llm_label, llm_timing, llm_reason, text_snippet
+  author, offset_from_cd1, matched_term, regex_label, [llm_label, llm_timing, llm_reason]
 
 Input:
   data/interim/timeline_with_offsets_with_anchors_*.csv
 
 Output:
-  data/interim/bc_candidates_{timestamp}.csv      -- regex hits (before LLM)
-  data/interim/bc_users_{timestamp}.csv           -- all LLM results
-  data/interim/bc_users_event_{timestamp}.csv     -- STARTED + STOPPED only (event-based)
-  data/interim/bc_users_stable_{timestamp}.csv    -- STABLE_USING only (baseline group)
+  data/interim/bc_candidates_{timestamp}.csv      -- regex hits with regex_label
+  data/interim/bc_users_{timestamp}.csv           -- final results (regex or LLM)
+  data/interim/bc_users_event_{timestamp}.csv     -- STARTED + STOPPED only
+  data/interim/bc_users_stable_{timestamp}.csv    -- STABLE_USING only
 """
 
 from __future__ import annotations
@@ -51,128 +51,145 @@ from src.io import find_latest_file, save_with_timestamp
 
 
 # ---------------------------------------------------------------------------
-# BC pill regex patterns (broad — all intent/timing handled by LLM)
+# BC pill regex — label-specific patterns
+# ---------------------------------------------------------------------------
+# Strategy: each pattern group is specific enough to auto-label without LLM.
+# _PILL matches any generic or brand pill term (used inside action patterns).
+# Exclusion patterns are checked first to drop hypotheticals / other-person posts.
 # ---------------------------------------------------------------------------
 
-_GENERIC = [
-    r"birth[ -]control pill",
-    r"oral contraceptive",
-    r"\bthe pill\b",
-    r"\bBCP\b",
-    r"\bBCPs\b",
-    r"\bOCP\b",
-    r"\bOCPs\b",
-    r"\bbc pill",
-    r"\btaking bc\b",
-    r"\bstarted bc\b",
-    r"\bstopped bc\b",
-    r"\bquit bc\b",
-    r"\bcontraceptive pill",
-    r"\bminipill\b",
-    r"\bmini.pill\b",
-    r"\bprogestin.only pill\b",
-    r"\bcombined pill\b",
-    r"been on the pill",
-    r"started.{0,10}pill",
-    r"taking.{0,10}pill",
-    r"stopped.{0,10}pill",
-    r"quit.{0,10}pill",
-    r"went on.{0,10}pill",
-    r"went off.{0,10}pill",
-    r"coming off.{0,10}pill",
-    r"came off.{0,10}pill",
-    r"got on.{0,10}pill",
-    r"got off.{0,10}pill",
+_BRAND_NAMES = (
+    r"Yaz|Yasmin|Yasminelle|Junel|Sprintec|Tri.Sprintec|Loestrin|Lo\.?\s*Loestrin|"
+    r"Microgestin|Ortho.Tri.Cyclen|Levlen|Alesse|Aviane|Lutera|Portia|Cryselle|"
+    r"Blisovi|Seasonique|Seasonale|Lybrel|Mircette|Kariva|Estrostep|Nordette|"
+    r"Levora|TriNessa|Elinest|Camrese|Introvale|Quasense|Daysee|Amethia|Chateal|"
+    r"Falmina|Larissia|Ocella|Zarah|Novynette|Dianette|Cilest|Mercilon|Marvelon|"
+    r"Microgynon|Rigevidon|Levest|Gedarel|Femodene|Femodette|Millinette|Logynon|"
+    r"Trinovum|Brevicon|Modicon|Nelova|Nortrel|Ortho.Novum|Zenchent|Gianvi|"
+    r"Loryna|Vestura|Nikki|Sylara|Cyred|Eminique|Aurovela|Larin|Natazia|Qlaira|"
+    r"Zoely|Slinda|Slynd|Camila|Errin|Jencycla|Lyza|Nora.BE|"
+    r"Norethindrone|Norgestrel|Desogestrel|Drospirenone"
+)
+
+# Any pill reference (generic or brand)
+_PILL = (
+    r"(?:the pill|bc pills?|birth control pills?|oral contraceptives?|"
+    r"combined pill|mini.?pill|minipill|progestin.only pill|"
+    r"BCP|BCPs|OCP|OCPs|contraceptive pill|"
+    + _BRAND_NAMES + r")"
+)
+
+# Temporal / recency markers
+_RECENT = r"(?:just|recently|finally|today|yesterday|last (?:week|month|night)|this (?:week|month)|a (?:few |couple of )?(?:days?|weeks?) ago|\d+ (?:days?|weeks?|months?) ago)"
+
+# --- EXCLUSION: filter these out before labeling ----------------------------
+_EXCLUSION_PATTERNS = [
+    # Hypothetical / considering
+    r"(?:thinking about|considering|want to|wondering if|should i|looking into|"
+    r"debating|not sure (?:if|about)|deciding whether|contemplating|afraid to|"
+    r"nervous about|scared to)\s+.{0,60}(?:start|take|go on|try)\s+.{0,40}" + _PILL,
+    # Another person's pills (not the author)
+    r"(?:my|her|his|their)\s+(?:friend|sister|mom|mother|partner|husband|boyfriend|"
+    r"wife|daughter|girlfriend|roommate)\s+.{0,40}(?:started|takes|is on|taking|stopped|quit|prescribed)\s+.{0,30}" + _PILL,
+    # Emergency / morning-after only
+    r"\b(?:plan b|morning.?after pill|emergency contracepti)",
 ]
 
-# Brand / generic drug names (oral contraceptive pills only)
-_BRANDS = [
-    r"\bYaz\b",
-    r"\bYasmin\b",
-    r"\bYasminelle\b",
-    r"\bJunel\b",
-    r"\bSprintec\b",
-    r"\bLoestrin\b",
-    r"\bLo Loestrin\b",
-    r"\bMicrogestin\b",
-    r"\bOrtho.Tri.Cyclen\b",
-    r"\bTri.Sprintec\b",
-    r"\bLevlen\b",
-    r"\bAlesse\b",
-    r"\bAviane\b",
-    r"\bLutera\b",
-    r"\bPortia\b",
-    r"\bCryselle\b",
-    r"\bBlisovi\b",
-    r"\bSeasonique\b",
-    r"\bSeasonale\b",
-    r"\bLybrel\b",
-    r"\bMircette\b",
-    r"\bKariva\b",
-    r"\bEstrostep\b",
-    r"\bNordette\b",
-    r"\bLevora\b",
-    r"\bTriNessa\b",
-    r"\bElinest\b",
-    r"\bCamrese\b",
-    r"\bIntrovale\b",
-    r"\bQuasense\b",
-    r"\bDaysee\b",
-    r"\bAmethia\b",
-    r"\bChateal\b",
-    r"\bFalmina\b",
-    r"\bLarissia\b",
-    r"\bOcella\b",
-    r"\bZarah\b",
-    r"\bNovynette\b",
-    r"\bDianette\b",
-    r"\bCilest\b",
-    r"\bMercilon\b",
-    r"\bMarvelon\b",
-    r"\bMicrogynon\b",
-    r"\bRigevidon\b",
-    r"\bLevest\b",
-    r"\bGedarel\b",
-    r"\bFemodene\b",
-    r"\bFemodette\b",
-    r"\bMillinette\b",
-    r"\bLogynon\b",
-    r"\bTrinovum\b",
-    r"\bBrevicon\b",
-    r"\bModicon\b",
-    r"\bNelova\b",
-    r"\bNortrel\b",
-    r"\bOrtho.Novum\b",
-    r"\bZenchent\b",
-    r"\bGianvi\b",
-    r"\bLoryna\b",
-    r"\bVestura\b",
-    r"\bNikki\b",
-    r"\bSylara\b",
-    r"\bCyred\b",
-    r"\bEminique\b",
-    r"\bAurovela\b",
-    r"\bLarin\b",
-    r"\bNatazia\b",
-    r"\bQlaira\b",
-    r"\bZoely\b",
-    r"\bSlinda\b",
-    r"\bSlynd\b",
-    r"\bCamila\b",
-    r"\bErrin\b",
-    r"\bJencycla\b",
-    r"\bLyza\b",
-    r"\bNora.BE\b",
-    r"\bNorethindrone\b",
-    r"\bNorgestrel\b",
-    r"\bDesogestrel\b",
-    r"\bDrospirenone\b",
+_EXCLUSION_REGEX = re.compile(
+    "|".join(_EXCLUSION_PATTERNS), flags=re.IGNORECASE
+)
+
+# --- STARTED patterns -------------------------------------------------------
+_STARTED_PATTERNS = [
+    # "just/recently started (taking) <pill>"
+    rf"{_RECENT}\s+started\s+(?:taking\s+)?{_PILL}",
+    rf"started\s+(?:taking\s+)?{_PILL}\s+{_RECENT}",
+    # "began taking <pill>"
+    rf"(?:just |recently )?began\s+(?:taking\s+)?{_PILL}",
+    # "put/started me on <pill>"
+    rf"(?:put|started|got)\s+me\s+on\s+{_PILL}",
+    rf"(?:my\s+)?(?:doctor|ob|gyn|gynecologist|physician)\s+.{{0,30}}(?:prescribed|put me on|started me on)\s+{_PILL}",
+    # "prescribed <pill> and I start / started"
+    rf"prescribed\s+{_PILL}.{{0,60}}(?:start|starting|started)",
+    # "I'm on my first/second week/pack of <pill>"
+    rf"(?:i'?m?|i am)\s+on\s+(?:my\s+)?(?:first|second|third|1st|2nd|3rd)\s+(?:day|week|pack|month)\s+(?:of|on)\s+{_PILL}",
+    # "first week/pack on <pill>"
+    rf"first\s+(?:week|pack|month)\s+(?:of|on)\s+{_PILL}",
+    # "I started <brand> [timeframe]"
+    rf"i\s+(?:just\s+)?started\s+(?:taking\s+)?(?:{_BRAND_NAMES})\b",
+    # "going to start / about to start <pill>"
+    rf"(?:going to|about to|starting)\s+(?:take\s+|start\s+)?{_PILL}\s+(?:tomorrow|next week|soon|this week)",
+    # "switched to <pill> [recently]"
+    rf"switched\s+(?:to|onto)\s+{_PILL}",
+    # "<pill> for [X months] now" implying recent start
+    rf"{_PILL}\s+for\s+(?:about\s+)?(?:a\s+)?(?:few\s+)?(?:1|2|3|4|5|6|one|two|three|four|five|six)\s+(?:days?|weeks?|months?)\s+(?:now|so far)",
 ]
 
+# --- STOPPED patterns -------------------------------------------------------
+_STOPPED_PATTERNS = [
+    # "came/went off <pill>"
+    rf"{_RECENT}\s+(?:came|went|gotten|got)\s+off\s+{_PILL}",
+    rf"(?:came|went|gotten|got)\s+off\s+{_PILL}\s+{_RECENT}",
+    # "stopped/quit/ditched taking <pill>"
+    rf"{_RECENT}\s+(?:stopped|quit|ditched|dropped)\s+(?:taking\s+)?{_PILL}",
+    rf"(?:stopped|quit|ditched|dropped)\s+(?:taking\s+)?{_PILL}\s+{_RECENT}",
+    # "been off <pill> for [time]"
+    rf"(?:i'?ve?\s+)?been\s+off\s+{_PILL}\s+for\s+(?:about\s+)?(?:a\s+)?(?:\d+|few|several|couple|a\s+while)",
+    # "after/since coming/going off <pill>"
+    rf"(?:after|since)\s+(?:stopping|quitting|coming\s+off|going\s+off)\s+{_PILL}",
+    # "coming off / going off <pill>"
+    rf"(?:coming|going|getting)\s+off\s+{_PILL}",
+    # "stopped <brand>"
+    rf"(?:stopped|quit|came off)\s+(?:{_BRAND_NAMES})\b",
+    # "off the pill for [time]"
+    rf"off\s+the\s+pill\s+for\s+(?:\d+|a\s+(?:few|couple)|several)\s+(?:days?|weeks?|months?)",
+    # "no longer on <pill>"
+    rf"no\s+longer\s+(?:on|taking)\s+{_PILL}",
+]
+
+# --- STABLE_USING patterns --------------------------------------------------
+_STABLE_PATTERNS = [
+    # "been on <pill> for [long time]"
+    rf"(?:i'?ve?\s+)?been\s+(?:on|taking)\s+{_PILL}\s+for\s+(?:\d+|a\s+few|several|many)\s+(?:months?|years?)",
+    # "on <pill> for years/months"
+    rf"(?:on|taking)\s+{_PILL}\s+for\s+(?:\d+|a\s+few|several|many)\s+(?:months?|years?)",
+    # "I take <pill> every day / daily"
+    rf"(?:i\s+take|i'?m\s+taking)\s+{_PILL}\s+(?:every\s+day|daily|each\s+day)",
+    # "currently on / still on <pill>"
+    rf"(?:currently|still)\s+(?:on|taking)\s+{_PILL}",
+    # "I'm on <pill> and ..." (stable context)
+    rf"i'?m\s+on\s+{_PILL}\s+(?:and|for|since|because|to\s+(?:help|treat|manage|control))",
+    # "have been on <pill> since"
+    rf"(?:have|had)\s+been\s+(?:on|taking)\s+{_PILL}\s+since",
+    # "<brand> for [long time]"
+    rf"(?:{_BRAND_NAMES})\s+for\s+(?:\d+|a\s+few|several|many)\s+(?:months?|years?)",
+    # "taking <brand> [daily/every day]"
+    rf"taking\s+(?:{_BRAND_NAMES})\b.{{0,30}}(?:every\s+day|daily|for\s+(?:\d+|a\s+few|several)\s+(?:months?|years?))",
+]
+
+_STARTED_REGEX  = re.compile("|".join(_STARTED_PATTERNS),  flags=re.IGNORECASE)
+_STOPPED_REGEX  = re.compile("|".join(_STOPPED_PATTERNS),  flags=re.IGNORECASE)
+_STABLE_REGEX   = re.compile("|".join(_STABLE_PATTERNS),   flags=re.IGNORECASE)
+
+# Combined filter: any post matching at least one label pattern is a candidate
 _BC_REGEX = re.compile(
-    "|".join(_GENERIC + _BRANDS),
+    "|".join(_STARTED_PATTERNS + _STOPPED_PATTERNS + _STABLE_PATTERNS),
     flags=re.IGNORECASE,
 )
+
+
+def classify_by_regex(text: str) -> str:
+    """Return STARTED / STOPPED / STABLE_USING / EXCLUDED based on regex only."""
+    t = str(text)
+    if _EXCLUSION_REGEX.search(t):
+        return "EXCLUDED"
+    if _STARTED_REGEX.search(t):
+        return "STARTED"
+    if _STOPPED_REGEX.search(t):
+        return "STOPPED"
+    if _STABLE_REGEX.search(t):
+        return "STABLE_USING"
+    return "OTHER"  # matched combined but no specific label (shouldn't happen often)
 
 
 def find_matched_term(text: str) -> str:
@@ -345,7 +362,8 @@ STABLE_LABELS = {"STABLE_USING"}
 
 
 def main(config_path: str = "configs/base.yaml", model: str = "llama3.1:8b",
-         candidates_file: str | None = None, limit: int | None = None):
+         candidates_file: str | None = None, limit: int | None = None,
+         no_llm: bool = False):
     cfg = load_config(config_path)
     interim_dir = Path(cfg["paths"]["interim"])
     interim_dir.mkdir(parents=True, exist_ok=True)
@@ -398,42 +416,60 @@ def main(config_path: str = "configs/base.yaml", model: str = "llama3.1:8b",
                 break
         candidates_slim = candidates[keep_cols].copy()
 
+        # Apply regex labeling to all candidates
+        print("  Applying label-specific regex classification...")
+        candidates_slim["regex_label"] = candidates_slim["text"].apply(classify_by_regex)
+
+        # Print regex label distribution
+        print("\n  Regex label distribution:")
+        for label, count in candidates_slim["regex_label"].value_counts().items():
+            pct = 100 * count / len(candidates_slim)
+            marker = " ✓" if label in EVENT_LABELS | STABLE_LABELS else ""
+            print(f"    {label:<18} {count:>5}  ({pct:.1f}%){marker}")
+
         out_candidates = save_with_timestamp(candidates_slim, interim_dir, "bc_candidates")
-        print(f"  Saved → {out_candidates.name}")
+        print(f"\n  Saved → {out_candidates.name}")
 
     if limit:
         print(f"\n  Limiting to first {limit} rows (--limit {limit})")
         candidates_slim = candidates_slim.head(limit)
 
-    # ---- LLM classification --------------------------------------------------
-    print(f"\n[Stage 3] LLM classification with '{model}'...")
-    classified = classify_batch(candidates_slim, model=model)
+    # ---- LLM classification (optional) ---------------------------------------
+    if no_llm:
+        print("\n[Stage 3] Skipping LLM — using regex labels only.")
+        classified = candidates_slim.copy()
+        # Drop EXCLUDED and OTHER — keep only clearly labeled posts
+        classified = classified[classified["regex_label"].isin(EVENT_LABELS | STABLE_LABELS)].copy()
+        print(f"  Kept {len(classified):,} posts with clear regex labels "
+              f"({classified['author'].nunique():,} users)")
+        label_col = "regex_label"
+    else:
+        print(f"\n[Stage 3] LLM classification with '{model}'...")
+        classified = classify_batch(candidates_slim, model=model)
+        label_col = "llm_label"
 
-    # Add text_snippet column for easy reading (300 chars)
+    # Add text_snippet for easy reading
     classified["text_snippet"] = classified["text"].str[:300]
 
-    # Full results (drop raw LLM response to keep file readable, keep for debugging)
     out_all = save_with_timestamp(classified, interim_dir, "bc_users")
     print(f"\n  Saved all results → {out_all.name}")
 
     # Label distribution
-    print("\n  Label distribution:")
-    for label, count in classified["llm_label"].value_counts().items():
+    print(f"\n  Label distribution ({label_col}):")
+    for label, count in classified[label_col].value_counts().items():
         pct = 100 * count / len(classified)
         marker = " ✓" if label in EVENT_LABELS | STABLE_LABELS else ""
         print(f"    {label:<18} {count:>5}  ({pct:.1f}%){marker}")
 
     # ---- Split into research-ready subsets -----------------------------------
-    # Event group: STARTED + STOPPED — for before/after analysis
-    event_df = classified[classified["llm_label"].isin(EVENT_LABELS)].copy()
+    event_df = classified[classified[label_col].isin(EVENT_LABELS)].copy()
     print(f"\n  Event group (STARTED+STOPPED): "
           f"{event_df['author'].nunique():,} users, {len(event_df):,} posts")
     if not event_df.empty:
         out_event = save_with_timestamp(event_df, interim_dir, "bc_users_event")
         print(f"  Saved → {out_event.name}")
 
-    # Stable group: STABLE_USING — for comparison baseline
-    stable_df = classified[classified["llm_label"].isin(STABLE_LABELS)].copy()
+    stable_df = classified[classified[label_col].isin(STABLE_LABELS)].copy()
     print(f"\n  Stable group (STABLE_USING): "
           f"{stable_df['author'].nunique():,} users, {len(stable_df):,} posts")
     if not stable_df.empty:
@@ -464,6 +500,12 @@ if __name__ == "__main__":
         default=None,
         help="Only classify the first N rows (for testing/sampling).",
     )
+    ap.add_argument(
+        "--no-llm",
+        action="store_true",
+        help="Skip LLM stage — use label-specific regex labels only.",
+    )
     args = ap.parse_args()
     exit(main(config_path=args.config, model=args.model,
-              candidates_file=args.candidates, limit=args.limit))
+              candidates_file=args.candidates, limit=args.limit,
+              no_llm=args.no_llm))
