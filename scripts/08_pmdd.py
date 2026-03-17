@@ -26,6 +26,7 @@ def main(
     use_all_users: bool = False,
     fallback_period: int = 29,
     output_subdir: str | None = None,
+    periodicity_file: str | None = None,
 ):
     """Run PMDD analysis pipeline.
     
@@ -291,16 +292,21 @@ def main(
     use_fallback = use_all_users
     
     if not use_fallback:
-        # Use config pattern if specified, otherwise use default search
-        periodicity_pattern = cfg["paths"].get("periodicity_file", None)
-        if periodicity_pattern:
-            periodicity_files = list(analysis_dir.glob(periodicity_pattern))
-            if periodicity_files:
-                periodicity_path = max(periodicity_files, key=lambda p: p.stat().st_mtime)
-            else:
-                periodicity_path = None
+        if periodicity_file:
+            periodicity_path = interim_dir / periodicity_file
+            if not periodicity_path.exists():
+                raise FileNotFoundError(f"Periodicity file not found: {periodicity_path}")
         else:
-            periodicity_path = find_periodicity_results(analysis_dir)
+            # Use config pattern if specified, otherwise use default search
+            periodicity_pattern = cfg["paths"].get("periodicity_file", None)
+            if periodicity_pattern:
+                periodicity_files = list(analysis_dir.glob(periodicity_pattern))
+                if periodicity_files:
+                    periodicity_path = max(periodicity_files, key=lambda p: p.stat().st_mtime)
+                else:
+                    periodicity_path = None
+            else:
+                periodicity_path = find_periodicity_results(analysis_dir)
         
         if periodicity_path is None:
             print(f"  WARNING: No periodicity results found.")
@@ -487,9 +493,15 @@ if __name__ == "__main__":
         default=None,
         help="Subdirectory for outputs (default: 'pmdd_analysis')",
     )
-    
+    parser.add_argument(
+        "--periodicity-file",
+        type=str,
+        default=None,
+        help="Specific consensus/periodicity file to use (filename only, looked up in interim dir)",
+    )
+
     args = parser.parse_args()
-    
+
     main(
         config_path=args.config,
         pattern=args.pattern,
@@ -498,5 +510,6 @@ if __name__ == "__main__":
         use_all_users=args.use_all_users,
         fallback_period=args.fallback_period,
         output_subdir=args.output_subdir,
+        periodicity_file=args.periodicity_file,
     )
 

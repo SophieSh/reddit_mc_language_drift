@@ -35,6 +35,7 @@ def main(
     force_recompute: bool = False,
     use_original_features_only: bool = False,
     pattern_1_only: bool = False,
+    no_anchors: bool = False,
 ):
     """Visualize cycle length distributions."""
     cfg = load_config(config_path)
@@ -52,12 +53,15 @@ def main(
     # Step 1: Load periodicity results
     print("[Step 9.1] Loading periodicity results...")
     
+    anchor_suffix = "_no_anchors" if no_anchors else ""
+
     if periodicity_file:
         periodicity_path = interim_dir / periodicity_file
         if not periodicity_path.exists():
             raise FileNotFoundError(f"Periodicity file not found: {periodicity_path}")
     else:
-        periodicity_path = find_latest_file(interim_dir, "periodicity_results_*.csv")
+        search_pattern = "periodicity_results_*_no_anchors_*.csv" if no_anchors else "periodicity_results_*.csv"
+        periodicity_path = find_latest_file(interim_dir, search_pattern)
         if not periodicity_path:
             raise FileNotFoundError(
                 f"No periodicity results found in {interim_dir}. "
@@ -122,7 +126,7 @@ def main(
         from datetime import datetime
         timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
         method_str = "_".join(sorted(periodicity_df['method'].unique()))
-        output_path = reports_dir / f"cycle_distributions_{method_str}_{timestamp}.png"
+        output_path = reports_dir / f"cycle_distributions_{method_str}{anchor_suffix}_{timestamp}.png"
         
         plot_cycle_distributions(
             periodicity_df,
@@ -141,7 +145,8 @@ def main(
             print(f"  ⚠ Consensus file not found: {consensus_path}")
             consensus_path = None
     else:
-        consensus_path = find_latest_file(interim_dir, "consensus_periods_*.csv")
+        consensus_search = f"consensus_periods_*{anchor_suffix}_*.csv" if no_anchors else "consensus_periods_*.csv"
+        consensus_path = find_latest_file(interim_dir, consensus_search)
     
     if consensus_path:
         print(f"   Found consensus results: {consensus_path.name}")
@@ -211,7 +216,7 @@ def main(
             from datetime import datetime
             timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
             min_features = consensus_df['n_features_agreeing'].min()
-            consensus_output_path = reports_dir / f"consensus_distribution_min{min_features}features_{timestamp}.png"
+            consensus_output_path = reports_dir / f"consensus_distribution_min{min_features}features{anchor_suffix}_{timestamp}.png"
             plt.savefig(consensus_output_path, dpi=150, bbox_inches='tight')
             plt.close()
             print(f"   Saved: {consensus_output_path.name}")
@@ -266,9 +271,14 @@ if __name__ == "__main__":
         action="store_true",
         help="Filter to only pattern_1 users (moon1 only, excluding moon2 and moon3)"
     )
-    
+    parser.add_argument(
+        "--no-anchors",
+        action="store_true",
+        help="Use no-anchors periodicity/consensus files and tag outputs with _no_anchors"
+    )
+
     args = parser.parse_args()
-    
+
     exit(main(
         config_path=args.config,
         periodicity_file=args.periodicity_file,
@@ -277,5 +287,6 @@ if __name__ == "__main__":
         force_recompute=args.force_recompute,
         use_original_features_only=args.original_features_only,
         pattern_1_only=args.pattern_1_only,
+        no_anchors=args.no_anchors,
     ))
 

@@ -38,45 +38,53 @@ def main(
     snr_threshold: float | None = None,
     use_checkpoint: bool = True,
     force_recompute: bool = False,
+    no_anchors: bool = False,
 ):
     """Run FFT periodicity detection on all features."""
     cfg = load_config(config_path)
-    
+
     interim_dir = Path(cfg["paths"]["interim"])
     analysis_cfg = cfg.get("analysis", {})
-    
+
     # Get parameters from config
     period_min = analysis_cfg.get("period_min", DEFAULT_PERIOD_MIN)
     period_max = analysis_cfg.get("period_max", DEFAULT_PERIOD_MAX)
     if snr_threshold is None:
         snr_threshold = analysis_cfg.get("snr_threshold", 3.0)
-    
+
+    anchor_suffix = "_no_anchors" if no_anchors else ""
+
     interim_dir.mkdir(parents=True, exist_ok=True)
-    
+
     print("=" * 60)
     print("Step 7: Run FFT Periodicity Detection")
     print("=" * 60)
     print(f"  Method: {method}")
     print(f"  Period range: {period_min}-{period_max} days")
     print(f"  SNR threshold: {snr_threshold}")
+    print(f"  Anchor posts: {'excluded' if no_anchors else 'included'}")
     print()
-    
+
     # Check for checkpoint
-    checkpoint_pattern = f"periodicity_results_{method}_snr{snr_threshold}_*.csv"
+    checkpoint_pattern = f"periodicity_results_{method}_snr{snr_threshold}{anchor_suffix}_*.csv"
     checkpoint = find_latest_file(interim_dir, checkpoint_pattern)
-    
+
     if use_checkpoint and not force_recompute and checkpoint:
         print(f" Found checkpoint: {checkpoint.name}")
         print(f"  To recompute, use --force-recompute")
         return 0
-    
-    # Step 1: Load daily aggregated timeline (WITH anchors - FFT always uses anchors)
-    print("[Step 7.1] Loading daily aggregated timeline (with anchors)...")
-    timeline_file = find_latest_file(interim_dir, "timeline_daily_aggregated_with_anchors_*.csv")
-    
+
+    # Step 1: Load daily aggregated timeline
+    timeline_pattern = (
+        "timeline_daily_aggregated_no_anchors_*.csv" if no_anchors
+        else "timeline_daily_aggregated_with_anchors_*.csv"
+    )
+    print(f"[Step 7.1] Loading daily aggregated timeline ({('no anchors' if no_anchors else 'with anchors')})...")
+    timeline_file = find_latest_file(interim_dir, timeline_pattern)
+
     if not timeline_file:
         raise FileNotFoundError(
-            f"No daily aggregated timeline with anchors found in {interim_dir}. "
+            f"No daily aggregated timeline ({timeline_pattern}) found in {interim_dir}. "
             "Please run scripts/06_aggregate_and_normalize.py first."
         )
     
@@ -174,7 +182,7 @@ def main(
     output_file = save_with_timestamp(
         results_df,
         interim_dir,
-        f"periodicity_results_{method}_snr{snr_threshold}"
+        f"periodicity_results_{method}_snr{snr_threshold}{anchor_suffix}"
     )
     print(f"   Saved: {output_file.name}")
     
@@ -232,14 +240,20 @@ if __name__ == "__main__":
         action="store_true",
         help="Recompute even if checkpoint exists"
     )
-    
+    parser.add_argument(
+        "--no-anchors",
+        action="store_true",
+        help="Use timeline without anchor posts (timeline_daily_aggregated_no_anchors_*.csv)"
+    )
+
     args = parser.parse_args()
-    
+
     exit(main(
         config_path=args.config,
         method=args.method,
         snr_threshold=args.snr_threshold,
         use_checkpoint=not args.no_checkpoint,
         force_recompute=args.force_recompute,
+        no_anchors=args.no_anchors,
     ))
 

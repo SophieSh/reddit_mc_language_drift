@@ -33,6 +33,7 @@ def main(
     force_recompute: bool = False,
     use_original_features_only: bool = False,
     pattern_1_only: bool = False,
+    no_anchors: bool = False,
 ):
     """Apply consensus period assignment across features."""
     cfg = load_config(config_path)
@@ -51,12 +52,15 @@ def main(
     print("=" * 60)
     print("Step 8: Apply X-Feature Consensus")
     print("=" * 60)
+    anchor_suffix = "_no_anchors" if no_anchors else ""
+
     print(f"  Min features for consensus: {min_features}")
     print(f"  Tolerance: ±{tolerance} days")
+    print(f"  Anchor posts: {'excluded' if no_anchors else 'included'}")
     print()
-    
+
     # Check for checkpoint
-    checkpoint = find_latest_file(interim_dir, "consensus_periods_*.csv")
+    checkpoint = find_latest_file(interim_dir, f"consensus_periods_*{anchor_suffix}_*.csv")
     
     if use_checkpoint and not force_recompute and checkpoint:
         print(f" Found checkpoint: {checkpoint.name}")
@@ -71,8 +75,9 @@ def main(
         if not periodicity_path.exists():
             raise FileNotFoundError(f"Periodicity file not found: {periodicity_path}")
     else:
-        # Find latest periodicity results file
-        periodicity_path = find_latest_file(interim_dir, "periodicity_results_*.csv")
+        # Find latest periodicity results file (no_anchors variant if requested)
+        search_pattern = "periodicity_results_*_no_anchors_*.csv" if no_anchors else "periodicity_results_*.csv"
+        periodicity_path = find_latest_file(interim_dir, search_pattern)
         if not periodicity_path:
             raise FileNotFoundError(
                 f"No periodicity results found in {interim_dir}. "
@@ -156,7 +161,7 @@ def main(
     output_file = save_with_timestamp(
         consensus_df,
         interim_dir,
-        f"consensus_periods_min{min_features}features"
+        f"consensus_periods_min{min_features}features{anchor_suffix}"
     )
     print(f"   Saved: {output_file.name}")
     
@@ -211,9 +216,14 @@ if __name__ == "__main__":
         action="store_true",
         help="Filter to only pattern_1 users (moon1 only, excluding moon2 and moon3)"
     )
-    
+    parser.add_argument(
+        "--no-anchors",
+        action="store_true",
+        help="Use periodicity results from no-anchors FFT run (periodicity_results_*_no_anchors_*.csv)"
+    )
+
     args = parser.parse_args()
-    
+
     exit(main(
         config_path=args.config,
         periodicity_file=args.periodicity_file,
@@ -223,5 +233,6 @@ if __name__ == "__main__":
         force_recompute=args.force_recompute,
         use_original_features_only=args.original_features_only,
         pattern_1_only=args.pattern_1_only,
+        no_anchors=args.no_anchors,
     ))
 

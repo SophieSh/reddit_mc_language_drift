@@ -1,0 +1,114 @@
+seed: 42
+run_id: "submission"
+
+paths:
+  raw: data/raw
+  interim: data/submission/interim
+  processed: data/submission/processed
+  features: data/submission/features
+  models: data/submission/models
+  reports: data/submission/reports
+  # Analysis directory for PMDD analysis pipeline (must point to where consensus files are)
+  analysis_dir: data/submission/interim
+  # Periodicity results file pattern
+  periodicity_file: consensus_periods_min5features_*.csv
+
+  files:
+    # Anchor files (Excel/CSV with pattern matches - used in preprocessing)
+    moon1_anchors: moon1.xlsx
+    moon2_anchors: moon2.xlsx
+    moon3_anchors: moon3.csv
+
+    # Posts files (TSV with all posts from users - for timeline building)
+    moon1_posts: moon1_all_post_2015_2025_filtered_features.csv
+    moon2_posts: moon2_all_post_2015_2025_filtered_features.csv
+    moon3_posts: moon3_all_posts_2010_2025.tsv
+
+    # Comments file (shared across all patterns)
+    comments_all: moon_all_comments_2009_2025.tsv
+
+    # User databases (in processed/ directory, stable processed data)
+    users_db_cd: users_database_CD_*.csv
+    users_db_dpo: users_database_DPO_*.csv
+
+reddit:
+  min_chars: 100
+  lang: "en"
+
+subreddits:
+  pmdd:
+    - PMDD
+    - PMDDxADHD
+    - PMDDSharing
+  depression:
+    - depression
+    - mentalhealth
+    - Anxiety
+    - socialanxiety
+    - AnxietyDepression
+  suicide:
+    - SuicideWatch
+  adhd:
+    - ADHD
+    - adhdwomen
+    - TwoXADHD
+    - ADHDWomenAfterDark
+    - PMDDxADHD
+    - adhd_anxiety
+    - adhdmeme
+    - ADHDers
+  mental_health:
+    - depression
+    - mentalhealth
+    - Anxiety
+    - socialanxiety
+    - AnxietyDepression
+    - SuicideWatch
+
+features:
+  sentiment: "vader"
+
+analysis:
+  methods:
+    - lomb_scargle
+    - fft_interpolation
+    - fft_zeropad
+  normalization: zscore
+  snr_threshold: 3.0
+  fap_threshold: 0.1
+  min_cycles: 1.5
+  interpolation: linear
+
+drift:
+  cycle_days_range: [21, 35]
+
+# Pattern source mapping (which moon file each pattern comes from)
+pattern_sources:
+  pattern_1: moon1
+  pattern_2: moon2
+  pattern_3: moon2
+  pattern_4: moon2
+  pattern_5: moon2
+  pattern_6: moon2
+  pattern_7: moon3
+  pattern_8: moon3
+  pattern_9: moon3
+
+# Pattern type grouping
+pattern_types:
+  cd: ["pattern_1", "pattern_2", "pattern_3", "pattern_4", "pattern_5", "pattern_6", "pattern_9"]
+  dpo: ["pattern_7"]
+
+patterns:
+  moon1:
+    pattern_1: "(started|got) my period (yesterday|today|a couple of days ago|last night|this morning|this evening)"
+  moon2:
+    pattern_2: "just got my period"
+    pattern_3: "my period on (January|February|March|April|May|June|July|August|September|October|November|December)"
+    pattern_4: "started menstruating (today|yesterday)"
+    pattern_5: "(i am|i'm) on day \\d+ of my period"
+    pattern_6: "my period started (yesterday|today|a couple of days ago|last night|this morning|this evening)"
+  moon3:
+    pattern_7: "(?:DPO\\s*:?[\\s-]*(\\d{1,2})|(\\d{1,2})\\s*:?[\\s-]*DPO)"
+    pattern_8: "lmp was(?: on)?"
+    pattern_9: "i'm on cd"
