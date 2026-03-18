@@ -72,7 +72,7 @@ def main(config_path: str = "configs/base.yaml", original_features_only: bool = 
 
     # --- Load consensus periods (no-anchors variant if requested) ---
     consensus_pattern = f"consensus_periods_*{anchor_suffix}_*.csv" if no_anchors else "consensus_periods_*.csv"
-    consensus_path = find_latest_file(interim_dir, consensus_pattern)
+    consensus_path = find_latest_file(interim_dir, consensus_pattern, exclude=None if no_anchors else "_no_anchors")
     print(f"Loading consensus periods: {consensus_path.name}")
     consensus_df = pd.read_csv(consensus_path)
     print(f"  {len(consensus_df):,} users with consensus period")

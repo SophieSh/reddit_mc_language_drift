@@ -9,17 +9,20 @@ from pathlib import Path
 import pandas as pd
 
 
-def find_latest_file(directory: Path, pattern: str) -> Path | None:
+def find_latest_file(directory: Path, pattern: str, exclude: str | None = None) -> Path | None:
     """Find the most recently modified file matching pattern.
-    
+
     Args:
         directory: Directory to search
         pattern: Glob pattern (e.g., "timeline_*.csv")
-    
+        exclude: If provided, skip files whose name contains this substring
+
     Returns:
         Path to latest file, or None if no files found
     """
     files = sorted(directory.glob(pattern))
+    if exclude:
+        files = [f for f in files if exclude not in f.name]
     if not files:
         return None
     return max(files, key=lambda p: p.stat().st_mtime)

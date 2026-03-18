@@ -60,7 +60,7 @@ def main(
     print()
 
     # Check for checkpoint
-    checkpoint = find_latest_file(interim_dir, f"consensus_periods_*{anchor_suffix}_*.csv")
+    checkpoint = find_latest_file(interim_dir, f"consensus_periods_*{anchor_suffix}_*.csv", exclude=None if no_anchors else "_no_anchors")
     
     if use_checkpoint and not force_recompute and checkpoint:
         print(f" Found checkpoint: {checkpoint.name}")
@@ -77,7 +77,7 @@ def main(
     else:
         # Find latest periodicity results file (no_anchors variant if requested)
         search_pattern = "periodicity_results_*_no_anchors_*.csv" if no_anchors else "periodicity_results_*.csv"
-        periodicity_path = find_latest_file(interim_dir, search_pattern)
+        periodicity_path = find_latest_file(interim_dir, search_pattern, exclude=None if no_anchors else "_no_anchors")
         if not periodicity_path:
             raise FileNotFoundError(
                 f"No periodicity results found in {interim_dir}. "

@@ -67,7 +67,7 @@ def main(
 
     # Check for checkpoint
     checkpoint_pattern = f"periodicity_results_{method}_snr{snr_threshold}{anchor_suffix}_*.csv"
-    checkpoint = find_latest_file(interim_dir, checkpoint_pattern)
+    checkpoint = find_latest_file(interim_dir, checkpoint_pattern, exclude=None if no_anchors else "_no_anchors")
 
     if use_checkpoint and not force_recompute and checkpoint:
         print(f" Found checkpoint: {checkpoint.name}")

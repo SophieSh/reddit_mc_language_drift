@@ -61,7 +61,7 @@ def main(
             raise FileNotFoundError(f"Periodicity file not found: {periodicity_path}")
     else:
         search_pattern = "periodicity_results_*_no_anchors_*.csv" if no_anchors else "periodicity_results_*.csv"
-        periodicity_path = find_latest_file(interim_dir, search_pattern)
+        periodicity_path = find_latest_file(interim_dir, search_pattern, exclude=None if no_anchors else "_no_anchors")
         if not periodicity_path:
             raise FileNotFoundError(
                 f"No periodicity results found in {interim_dir}. "
@@ -146,7 +146,7 @@ def main(
             consensus_path = None
     else:
         consensus_search = f"consensus_periods_*{anchor_suffix}_*.csv" if no_anchors else "consensus_periods_*.csv"
-        consensus_path = find_latest_file(interim_dir, consensus_search)
+        consensus_path = find_latest_file(interim_dir, consensus_search, exclude=None if no_anchors else "_no_anchors")
     
     if consensus_path:
         print(f"   Found consensus results: {consensus_path.name}")
