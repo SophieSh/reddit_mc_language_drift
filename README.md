@@ -1,9 +1,8 @@
-
 ## **Using Spectral Analysis and Passive Linguistic Monitoring for Detecting Cognitive, Behavioral, and Risk-related Fluctuations in Cyclical Health Timelines**
 
 ### **Project Overview**
 
-This project validates a computational method for detecting **menstrual cycle patterns** directly from social media text. **By applying spectral analysis to passive linguistic monitoring, we identified a high-confidence cohort of 1,059 users exhibiting a robust periodic signal in alignment with biological phase.** **Unlike active self-reporting, which is susceptible to expectancy bias, this passive approach captures naturalistic behavior and implicit changes in user state**.
+This project validates a computational method for detecting menstrual cycle patterns directly from social media text. By applying spectral analysis to passive linguistic monitoring, we identified a high-confidence cohort of 1,059 users exhibiting a robust periodic signal in alignment with biological phase. Unlike active self-reporting, which is susceptible to expectancy bias, this passive approach captures naturalistic behavior and implicit changes in user state.
 
 ### **Methodology & Data Pipeline**
 
@@ -15,8 +14,12 @@ This project validates a computational method for detecting **menstrual cycle pa
 ### **Key Results**
 
 * **Cycle Distribution** : Detected a unimodal cycle length distribution with a mean of **29.1 days**, closely matching large-scale physiological studies of active trackers.
-* **Cognitive "Brain Fog"**: Observed a distinct **Luteal phase** change characterized by an increase in spelling errors, suggesting a deficit in attentional resources required for error-checking rather than a loss of verbal fluency.
+* **Phase-Specific Linguistic Trajectories** : Observed emotional and structural signals aligning with expected biological fluctuations. For example, the Menstrual phase was characterized by elevated negative sentiment and simpler text structure, while Ovulation demonstrated positive sentiment and high syntactic complexity.
 * **Clinical Risk Analysis**: Identified that users in the **Premenstrual Dysphoric Disorder (PMDD)** subgroup exhibited significantly higher rates of psychiatric risk markers, including depression and suicidality.
+
+### **Significance & Impact**
+
+Broadly, these findings establish a proof of concept that crowdsourced social media language can be effectively utilized for the passive tracking of cyclical health patterns. By capturing implicit behavioral data without expectancy bias, this NLP-driven approach offers a scalable, non-invasive alternative to traditional clinical monitoring and serves as a robust foundation for future research into complex cognitive and emotional shifts.
 
 ### **Repo Structure**
 
