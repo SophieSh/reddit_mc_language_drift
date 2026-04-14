@@ -39,6 +39,7 @@ def main(
     use_checkpoint: bool = True,
     force_recompute: bool = False,
     no_anchors: bool = False,
+    aggregated_file: str | None = None,
 ):
     """Run FFT periodicity detection on all features."""
     cfg = load_config(config_path)
@@ -66,7 +67,9 @@ def main(
     print()
 
     # Check for checkpoint
-    checkpoint_pattern = f"periodicity_results_{method}_snr{snr_threshold}{anchor_suffix}_*.csv"
+    files_cfg = cfg["paths"]["files"]
+    pr_prefix = files_cfg["periodicity_results"]
+    checkpoint_pattern = f"{pr_prefix}_{method}_snr{snr_threshold}{anchor_suffix}_*.csv"
     checkpoint = find_latest_file(interim_dir, checkpoint_pattern, exclude=None if no_anchors else "_no_anchors")
 
     if use_checkpoint and not force_recompute and checkpoint:
@@ -75,12 +78,18 @@ def main(
         return 0
 
     # Step 1: Load daily aggregated timeline
+    files_cfg = cfg["paths"]["files"]
     timeline_pattern = (
-        "timeline_daily_aggregated_no_anchors_*.csv" if no_anchors
-        else "timeline_daily_aggregated_with_anchors_*.csv"
+        files_cfg["daily_aggregated_no_anchors"] + "_*.csv" if no_anchors
+        else files_cfg["daily_aggregated_with_anchors"] + "_*.csv"
     )
     print(f"[Step 7.1] Loading daily aggregated timeline ({('no anchors' if no_anchors else 'with anchors')})...")
-    timeline_file = find_latest_file(interim_dir, timeline_pattern)
+    if aggregated_file:
+        timeline_file = Path(aggregated_file)
+        if not timeline_file.exists():
+            timeline_file = interim_dir / aggregated_file
+    else:
+        timeline_file = find_latest_file(interim_dir, timeline_pattern)
 
     if not timeline_file:
         raise FileNotFoundError(
@@ -182,7 +191,7 @@ def main(
     output_file = save_with_timestamp(
         results_df,
         interim_dir,
-        f"periodicity_results_{method}_snr{snr_threshold}{anchor_suffix}"
+        f"{pr_prefix}_{method}_snr{snr_threshold}{anchor_suffix}"
     )
     print(f"   Saved: {output_file.name}")
     
@@ -245,6 +254,12 @@ if __name__ == "__main__":
         action="store_true",
         help="Use timeline without anchor posts (timeline_daily_aggregated_no_anchors_*.csv)"
     )
+    parser.add_argument(
+        "--aggregated-file",
+        type=str,
+        default=None,
+        help="Path or filename (in interim dir) of a specific aggregated file to use instead of the latest."
+    )
 
     args = parser.parse_args()
 
@@ -255,5 +270,6 @@ if __name__ == "__main__":
         use_checkpoint=not args.no_checkpoint,
         force_recompute=args.force_recompute,
         no_anchors=args.no_anchors,
+        aggregated_file=args.aggregated_file,
     ))
 

@@ -23,7 +23,7 @@ from src.config import load_config
 from src.utils import load_latest_preprocessed_file
 
 
-def create_users_database(interim_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+def create_users_database(interim_dir: Path, files_cfg: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Create database with one row per user (most recent anchor post).
 
     Filters for non-uncertain posts with valid offset_from_cd1.
@@ -34,9 +34,9 @@ def create_users_database(interim_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame
         Tuple of (df_patterns_1_6_9, df_pattern_7) DataFrames.
     """
     pattern_files = {
-        "moon1": "moon_with_uncertainty_*.csv",
-        "moon2": "moon2_with_uncertainty_*.csv",
-        "moon3": "moon3_with_uncertainty_*.csv",
+        "moon1": files_cfg["moon_preprocessed"] + "_*.csv",
+        "moon2": files_cfg["moon2_preprocessed"] + "_*.csv",
+        "moon3": files_cfg["moon3_preprocessed"] + "_*.csv",
     }
 
     all_anchors: list[pd.DataFrame] = []
@@ -183,7 +183,7 @@ def main() -> None:
     print("Creating users database with latest anchor posts")
     print("=" * 60)
 
-    result_1_6_9, result_dpo = create_users_database(interim_dir)
+    result_1_6_9, result_dpo = create_users_database(interim_dir, cfg["paths"]["files"])
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
 
     if len(result_1_6_9) > 0:

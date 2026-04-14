@@ -113,9 +113,11 @@ def main(
     print("=" * 60)
     print()
     
+    files_cfg = cfg["paths"]["files"]
+
     # Check for checkpoint (with anchors version)
-    checkpoint = find_latest_file(interim_dir, "posts_all_users_preprocessed_with_anchors_*.csv")
-    
+    checkpoint = find_latest_file(interim_dir, files_cfg["posts_with_anchors"] + "_*.csv")
+
     if use_checkpoint and not force_recompute and checkpoint:
         print(f" Found checkpoint: {checkpoint.name}")
         print(f"  To recompute, use --force-recompute")
@@ -123,7 +125,7 @@ def main(
     
     # Step 1: Load user database
     print("[Step 4.1] Loading user database...")
-    users_db_file = find_latest_file(processed_dir, "users_database_CD_*.csv")
+    users_db_file = find_latest_file(processed_dir, files_cfg["users_db_cd"])
     
     if not users_db_file:
         raise FileNotFoundError(
@@ -229,14 +231,14 @@ def main(
     output_with = save_with_timestamp(
         posts_df,
         interim_dir,
-        "posts_all_users_preprocessed_with_anchors"
+        files_cfg["posts_with_anchors"],
     )
     print(f"   Saved (with anchors): {output_with.name}")
-    
+
     output_no = save_with_timestamp(
         posts_no_anchors,
         interim_dir,
-        "posts_all_users_preprocessed_no_anchors"
+        files_cfg["posts_no_anchors"],
     )
     print(f"   Saved (no anchors): {output_no.name}")
     

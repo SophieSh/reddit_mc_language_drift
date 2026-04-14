@@ -45,8 +45,10 @@ def main(
     print("  Note: Normalization will be done in analysis step (inside analyze_user_timeline)")
     print()
     
+    files_cfg = cfg["paths"]["files"]
+
     # Check for checkpoint (with anchors version)
-    checkpoint = find_latest_file(interim_dir, "timeline_daily_aggregated_with_anchors_*.csv")
+    checkpoint = find_latest_file(interim_dir, files_cfg["daily_aggregated_with_anchors"] + "_*.csv")
     
     if use_checkpoint and not force_recompute and checkpoint:
         print(f" Found checkpoint: {checkpoint.name}")
@@ -55,7 +57,7 @@ def main(
     
     # Step 1: Load timeline with offsets (with anchors)
     print("[Step 6.1] Loading timeline with offsets...")
-    timeline_file = find_latest_file(interim_dir, "timeline_with_offsets_with_anchors_*.csv")
+    timeline_file = find_latest_file(interim_dir, files_cfg["timeline_with_anchors"] + "_*.csv")
     
     if not timeline_file:
         raise FileNotFoundError(
@@ -94,13 +96,13 @@ def main(
     output_file = save_with_timestamp(
         daily_agg,
         interim_dir,
-        "timeline_daily_aggregated_with_anchors"
+        files_cfg["daily_aggregated_with_anchors"],
     )
     print(f"   Saved (with anchors): {output_file.name}")
     
     # Optional: aggregate timeline WITHOUT anchors if available
     print("\n[Step 6.5] Aggregating timeline without anchors (if available)...")
-    timeline_no_anchors_file = find_latest_file(interim_dir, "timeline_with_offsets_no_anchors_*.csv")
+    timeline_no_anchors_file = find_latest_file(interim_dir, files_cfg["timeline_no_anchors"] + "_*.csv")
     
     if timeline_no_anchors_file is None:
         print("   No 'timeline_with_offsets_no_anchors_*.csv' file found; skipping no-anchors aggregation.")
@@ -141,7 +143,7 @@ def main(
         output_file_no = save_with_timestamp(
             daily_agg_no,
             interim_dir,
-            "timeline_daily_aggregated_no_anchors"
+            files_cfg["daily_aggregated_no_anchors"],
         )
         print(f"   Saved (no anchors): {output_file_no.name}")
     

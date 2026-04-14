@@ -52,8 +52,10 @@ def main(
         print(f"  Time window: ±{window_months} months")
     print()
     
+    files_cfg = cfg["paths"]["files"]
+
     # Check for checkpoint (with anchors timeline)
-    checkpoint = find_latest_file(interim_dir, "timeline_with_offsets_with_anchors_*.csv")
+    checkpoint = find_latest_file(interim_dir, files_cfg["timeline_with_anchors"] + "_*.csv")
     
     if use_checkpoint and not force_recompute and checkpoint:
         print(f" Found checkpoint: {checkpoint.name}")
@@ -62,7 +64,7 @@ def main(
     
     # Step 1: Load preprocessed posts (with anchors)
     print("[Step 5.1] Loading preprocessed posts...")
-    posts_file = find_latest_file(interim_dir, "posts_all_users_preprocessed_with_anchors_*.csv")
+    posts_file = find_latest_file(interim_dir, files_cfg["posts_with_anchors"] + "_*.csv")
     
     if not posts_file:
         raise FileNotFoundError(
@@ -76,7 +78,7 @@ def main(
     
     # Step 2: Load user database
     print("\n[Step 5.2] Loading user database...")
-    users_db_file = find_latest_file(processed_dir, "users_database_CD_*.csv")
+    users_db_file = find_latest_file(processed_dir, files_cfg["users_db_cd"])
     
     if not users_db_file:
         raise FileNotFoundError(
@@ -131,7 +133,7 @@ def main(
     output_file = save_with_timestamp(
         timeline_df,
         interim_dir,
-        "timeline_with_offsets_with_anchors"
+        files_cfg["timeline_with_anchors"],
     )
     print(f"   Saved (with anchors): {output_file.name}")
     
@@ -140,7 +142,7 @@ def main(
     from src.preprocess import filter_posts_by_anchor_window
     
     print("\n[Step 5.7] Building timeline without anchors (if posts file exists)...")
-    no_anchors_file = _find_latest(interim_dir, "posts_all_users_preprocessed_no_anchors_*.csv")
+    no_anchors_file = _find_latest(interim_dir, files_cfg["posts_no_anchors"] + "_*.csv")
     
     if no_anchors_file is None:
         print("  No 'posts_all_users_preprocessed_no_anchors_*.csv' file found; skipping timeline_without_anchors.")
@@ -187,7 +189,7 @@ def main(
         output_file_no = save_with_timestamp(
             timeline_no_anchors_df,
             interim_dir,
-            "timeline_with_offsets_no_anchors"
+            files_cfg["timeline_no_anchors"],
         )
         print(f"   Saved (no anchors): {output_file_no.name}")
     

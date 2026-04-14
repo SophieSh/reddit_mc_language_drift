@@ -59,8 +59,11 @@ def main(
     print(f"  Anchor posts: {'excluded' if no_anchors else 'included'}")
     print()
 
+    files_cfg = cfg["paths"]["files"]
+
     # Check for checkpoint
-    checkpoint = find_latest_file(interim_dir, f"consensus_periods_*{anchor_suffix}_*.csv", exclude=None if no_anchors else "_no_anchors")
+    cp_prefix = files_cfg["consensus_periods"]
+    checkpoint = find_latest_file(interim_dir, f"{cp_prefix}_*{anchor_suffix}_*.csv", exclude=None if no_anchors else "_no_anchors")
     
     if use_checkpoint and not force_recompute and checkpoint:
         print(f" Found checkpoint: {checkpoint.name}")
@@ -76,7 +79,8 @@ def main(
             raise FileNotFoundError(f"Periodicity file not found: {periodicity_path}")
     else:
         # Find latest periodicity results file (no_anchors variant if requested)
-        search_pattern = "periodicity_results_*_no_anchors_*.csv" if no_anchors else "periodicity_results_*.csv"
+        pr_prefix = files_cfg["periodicity_results"]
+        search_pattern = f"{pr_prefix}_*_no_anchors_*.csv" if no_anchors else f"{pr_prefix}_*.csv"
         periodicity_path = find_latest_file(interim_dir, search_pattern, exclude=None if no_anchors else "_no_anchors")
         if not periodicity_path:
             raise FileNotFoundError(
@@ -161,7 +165,7 @@ def main(
     output_file = save_with_timestamp(
         consensus_df,
         interim_dir,
-        f"consensus_periods_min{min_features}features{anchor_suffix}"
+        f"{cp_prefix}_min{min_features}features{anchor_suffix}",
     )
     print(f"   Saved: {output_file.name}")
     

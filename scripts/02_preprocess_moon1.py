@@ -40,8 +40,9 @@ def main(cfg_path: str):
     
     df_output = df.drop(columns=['matched_phrase'], errors='ignore')
     
+    files_cfg = cfg["paths"]["files"]
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
-    output_path = interim_dir / f"moon_with_uncertainty_{timestamp}.csv"
+    output_path = interim_dir / f"{files_cfg['moon_preprocessed']}_{timestamp}.csv"
     df_output.to_csv(output_path, index=False, encoding='utf-8-sig')
     
     total_uncertain = df['has_uncertainty'].sum()

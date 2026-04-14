@@ -54,13 +54,15 @@ def main(
     print("[Step 9.1] Loading periodicity results...")
     
     anchor_suffix = "_no_anchors" if no_anchors else ""
+    files_cfg = cfg["paths"]["files"]
 
     if periodicity_file:
         periodicity_path = interim_dir / periodicity_file
         if not periodicity_path.exists():
             raise FileNotFoundError(f"Periodicity file not found: {periodicity_path}")
     else:
-        search_pattern = "periodicity_results_*_no_anchors_*.csv" if no_anchors else "periodicity_results_*.csv"
+        pr_prefix = files_cfg["periodicity_results"]
+        search_pattern = f"{pr_prefix}_*_no_anchors_*.csv" if no_anchors else f"{pr_prefix}_*.csv"
         periodicity_path = find_latest_file(interim_dir, search_pattern, exclude=None if no_anchors else "_no_anchors")
         if not periodicity_path:
             raise FileNotFoundError(
@@ -145,7 +147,8 @@ def main(
             print(f"  ⚠ Consensus file not found: {consensus_path}")
             consensus_path = None
     else:
-        consensus_search = f"consensus_periods_*{anchor_suffix}_*.csv" if no_anchors else "consensus_periods_*.csv"
+        cp_prefix = files_cfg["consensus_periods"]
+        consensus_search = f"{cp_prefix}_*{anchor_suffix}_*.csv" if no_anchors else f"{cp_prefix}_*.csv"
         consensus_path = find_latest_file(interim_dir, consensus_search, exclude=None if no_anchors else "_no_anchors")
     
     if consensus_path:

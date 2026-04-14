@@ -34,16 +34,17 @@ ORIGINAL_FEATURES = [
 ]
 
 
-def main(config_path: str = "configs/base.yaml", original_features_only: bool = False, no_anchors: bool = False) -> None:
+def main(config_path: str = "configs/base.yaml", original_features_only: bool = False, no_anchors: bool = False, consensus_file: str | None = None) -> None:
     cfg = load_config(config_path)
     interim_dir = Path(cfg["paths"]["interim"])
     reports_dir = Path(cfg["paths"]["reports"])
     reports_dir.mkdir(parents=True, exist_ok=True)
 
     anchor_suffix = "_no_anchors" if no_anchors else ""
+    files_cfg = cfg["paths"]["files"]
 
     # --- Load raw timeline (aggregate_features_by_phase does its own daily agg) ---
-    timeline_pattern = "timeline_with_offsets_no_anchors_*.csv" if no_anchors else "timeline_with_offsets_with_anchors_*.csv"
+    timeline_pattern = files_cfg["timeline_no_anchors"] + "_*.csv" if no_anchors else files_cfg["timeline_with_anchors"] + "_*.csv"
     timeline_path = find_latest_file(interim_dir, timeline_pattern)
     print(f"Loading timeline: {timeline_path.name}")
     timeline_df = pd.read_csv(timeline_path)
@@ -71,8 +72,12 @@ def main(config_path: str = "configs/base.yaml", original_features_only: bool = 
         print(f"  {len(features)} feature columns found")
 
     # --- Load consensus periods (no-anchors variant if requested) ---
-    consensus_pattern = f"consensus_periods_*{anchor_suffix}_*.csv" if no_anchors else "consensus_periods_*.csv"
-    consensus_path = find_latest_file(interim_dir, consensus_pattern, exclude=None if no_anchors else "_no_anchors")
+    if consensus_file:
+        consensus_path = Path(consensus_file) if Path(consensus_file).exists() else interim_dir / consensus_file
+    else:
+        cp_prefix = files_cfg["consensus_periods"]
+        consensus_pattern = f"{cp_prefix}_*{anchor_suffix}_*.csv" if no_anchors else f"{cp_prefix}_*.csv"
+        consensus_path = find_latest_file(interim_dir, consensus_pattern, exclude=None if no_anchors else "_no_anchors")
     print(f"Loading consensus periods: {consensus_path.name}")
     consensus_df = pd.read_csv(consensus_path)
     print(f"  {len(consensus_df):,} users with consensus period")
@@ -123,5 +128,7 @@ if __name__ == "__main__":
                         help="Restrict to the 10 original features only")
     parser.add_argument("--no-anchors", action="store_true",
                         help="Use no-anchors timeline and consensus files, tag outputs with _no_anchors")
+    parser.add_argument("--consensus-file", default=None,
+                        help="Path or filename (in interim dir) of a specific consensus CSV to use.")
     args = parser.parse_args()
-    main(args.config, original_features_only=args.original_features_only, no_anchors=args.no_anchors)
+    main(args.config, original_features_only=args.original_features_only, no_anchors=args.no_anchors, consensus_file=args.consensus_file)

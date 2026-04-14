@@ -31,6 +31,23 @@ paths:
     users_db_cd: users_database_CD_*.csv
     users_db_dpo: users_database_DPO_*.csv
 
+    # ── Intermediate pipeline files (prefixes, stored in interim/) ─────────────
+    # Usage: find_latest_file(interim_dir, prefix + "_*.csv")
+    #        save_with_timestamp(df, interim_dir, prefix)
+    moon_preprocessed: moon_with_uncertainty
+    moon2_preprocessed: moon2_with_uncertainty
+    moon3_preprocessed: moon3_with_uncertainty
+    posts_with_anchors: posts_all_users_preprocessed_with_anchors
+    posts_no_anchors: posts_all_users_preprocessed_no_anchors
+    timeline_with_anchors: timeline_with_offsets_with_anchors
+    timeline_no_anchors: timeline_with_offsets_no_anchors
+    daily_aggregated_with_anchors: timeline_daily_aggregated_with_anchors
+    daily_aggregated_no_anchors: timeline_daily_aggregated_no_anchors
+    periodicity_results: periodicity_results
+    consensus_periods: consensus_periods
+    phase_labeled: timeline_phase_labeled
+    ml_labeled_days: ml_labeled_days
+
 reddit:
   min_chars: 100
   lang: "en"
@@ -57,6 +74,8 @@ subreddits:
     - adhd_anxiety
     - adhdmeme
     - ADHDers
+  adhdmeme:
+    - adhdmeme
   mental_health:
     - depression
     - mentalhealth
