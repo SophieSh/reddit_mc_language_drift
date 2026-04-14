@@ -1425,6 +1425,34 @@ def assign_phases_to_timeline(
     return timeline_df
 
 
+def aggregate_to_phase_profiles(df: pd.DataFrame, zscore_cols: list[str]) -> pd.DataFrame:
+    """Collapse day-level rows to one averaged feature vector per (user, phase).
+
+    Instead of predicting from a single noisy day, each sample becomes a user's
+    mean linguistic profile across all days in a given phase.  This removes
+    within-phase day-to-day noise and matches exactly what bar charts display.
+
+    Result: ~N_users × 4 rows (one per user-phase pair that has data).
+    GroupKFold must still be keyed on author so all phase rows for a user
+    stay together in either train or test.
+
+    Args:
+        df: Day-level DataFrame with 'author', 'phase', and zscore_cols.
+        zscore_cols: Feature columns to average (typically {feature}_zscore columns).
+
+    Returns:
+        DataFrame with one row per (author, phase), columns = author + phase + zscore_cols.
+    """
+    profiles = (
+        df.groupby(["author", "phase"])[zscore_cols]
+        .mean()
+        .reset_index()
+    )
+    # Fill NaN means with 0 (= user's own mean, since features are z-scored)
+    profiles[zscore_cols] = profiles[zscore_cols].fillna(0)
+    return profiles
+
+
 def calculate_phase_statistics(
     df: pd.DataFrame,
     group_name: str,
