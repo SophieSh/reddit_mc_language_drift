@@ -2,13 +2,7 @@
 Step 12 — ML Phase Prediction Pipeline
 ========================================
 Predicts menstrual cycle phase (Menstrual / Follicular / Ovulation / Luteal) from
-daily-aggregated linguistic features, using two complementary models:
-
-  Model 1 — DecisionTreeClassifier (max_depth 3-4)
-      Interpretable clinical baseline. Full tree saved as a high-resolution PNG.
-
-  Model 2 — XGBoostClassifier (RandomForest fallback)
-      Maximum-accuracy ensemble + SHAP beeswarm plots.
+daily-aggregated linguistic features using XGBoostClassifier.
 
 Why daily aggregates, not individual posts?
   The scientific question is: "Does a user's language on a given cycle DAY differ
@@ -20,14 +14,15 @@ Why daily aggregates, not individual posts?
   independent information.  Daily aggregation (step 06) gives one clean,
   de-noised observation per user-day.
 
-  Step 06 already computes per-user z-score normalized features
-  ({feature}_zscore columns) via normalize_features_per_user_zscore().
-  Step 12 reuses those directly — no re-normalization needed.
+  Step 06 produces {feature}_mean columns (daily averages per user-day).
+  Step 12 computes per-user z-score normalized features from those _mean columns
+  via normalize_features_per_user_zscore(), which normalises each feature relative
+  to that user's own mean and std across all their days.
 
 Users included
-  Only users with a statistically significant detected period from step 07
-  (consensus_periods_*.csv / periodicity_results_*.csv).  Users without a
-  reliable detected cycle length get unreliable phase labels and are excluded.
+  Only users with a statistically significant detected period from step 08
+  (consensus_periods_*.csv).  Phase labeling is done once in step 08b and saved
+  as timeline_phase_labeled_*.csv.  Run scripts/08b_label_phases.py first.
 
 Data leakage prevention
   GroupKFold splits are keyed on author (user_id).  Multiple days from the
@@ -35,35 +30,30 @@ Data leakage prevention
   are shared.  A user's days must stay entirely in either train or test.
 
 Pipeline
-  [1] Load daily aggregated timeline (step 06 output)
-  [2] Build user → cycle_length map (step 07, detected users only)
-  [3] Filter to detected-period users, assign phase per user-day
-  [4] Select {feature}_zscore columns (already computed in step 06)
-  [5] Save labelled dataset → data/interim/ml_labeled_days_*.csv
-  [6] Model 1 — Decision Tree (interpretable baseline)
-  [7] Model 2 — XGBoost/RF ensemble + confusion matrix
-  [8] SHAP explainability
+  [1] Load phase-labeled timeline (step 08b output)
+  [2] Compute per-user z-scores from _mean columns
+  [3] Optionally aggregate to per-user phase profiles (--aggregate-by-phase)
+  [4] Save labelled dataset → data/interim/ml_labeled_days_*.csv
+  [5] XGBoost ensemble + confusion matrix + SHAP explainability
+  [6] Optional OvR ensemble with per-phase AUC
 
 Output (reports/ml/)
-  decision_tree_depth{D}_*.png
-  classification_report_tree_*.txt
   confusion_matrix_ensemble_*.png
+  classification_report_ensemble_*.txt
   shap_summary_global_*.png
   shap_summary_{phase}_*.png
+  ovr_phase_auc_*.png (with --ovr)
 
 Usage
   python scripts/12_ml_phase_prediction.py --config configs/base.yaml
-  python scripts/12_ml_phase_prediction.py --config configs/base.yaml --tree-depth 3
   python scripts/12_ml_phase_prediction.py --config configs/base.yaml --skip-shap
 
 Recommended mode (best AUC):
   python scripts/12_ml_phase_prediction.py --aggregate-by-phase
   → Macro AUC ~0.75 (OvR ensemble): Menstrual=0.77, Ovulation=0.79, Luteal=0.84
-  → Robust without anchors: Macro AUC ~0.727
 
 Confirmed null results (do not re-investigate):
-  --split-luteal: EarlyLuteal AUC=0.564, LateLuteal=0.558 — both near chance.
-    Late Luteal has no distinct linguistic profile separable from Early Luteal.
+  Luteal split (EarlyLuteal/LateLuteal): both AUC near chance (~0.56).
 """
 
 import argparse
@@ -77,7 +67,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import shap
-from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import (
     ConfusionMatrixDisplay,
     classification_report,
@@ -85,279 +74,69 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 from sklearn.base import clone
-from sklearn.feature_selection import f_classif
 from sklearn.model_selection import GroupKFold
 from sklearn.preprocessing import LabelEncoder
-from sklearn.tree import DecisionTreeClassifier, plot_tree
+from xgboost import XGBClassifier
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.analysis import (
-    assign_phases_to_timeline,
-    compute_user_phase_definitions,
+    aggregate_to_phase_profiles,
     normalize_features_per_user_zscore,
 )
 from src.config import load_config
-from src.io import find_latest_file, find_periodicity_results, save_with_timestamp
-
-try:
-    from xgboost import XGBClassifier
-    XGBOOST_AVAILABLE = True
-except ImportError:
-    XGBOOST_AVAILABLE = False
-    logging.warning("xgboost not installed — falling back to RandomForestClassifier.")
+from src.io import find_latest_file, save_with_timestamp
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
 PHASE_ORDER = ["Menstrual", "Follicular", "Ovulation", "Luteal"]
-PHASE_ORDER_SPLIT_LUTEAL = ["Menstrual", "Follicular", "Ovulation", "EarlyLuteal", "LateLuteal"]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 1. DATA LOADING
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def load_daily_aggregated(interim_dir: Path, anchors: str = "with") -> pd.DataFrame:
-    """Load the daily-aggregated timeline produced by step 06.
+def load_phase_labeled(interim_dir: Path, pattern: str) -> pd.DataFrame:
+    """Load the phase-labeled daily timeline produced by step 08b.
 
-    Row unit: ONE (user, cycle_day) pair.
-    Columns include {feature}_mean and {feature}_zscore (per-user z-scores).
+    Row unit: ONE (user, cycle_day) pair, already filtered to detected-period
+    users and annotated with 'phase' (Menstrual/Follicular/Ovulation/Luteal).
 
-    Args:
-        anchors: "with" to prefer timeline_daily_aggregated_with_anchors_*.csv,
-                 "without" to prefer the no_anchors variant,
-                 "any" to pick latest regardless of name.
+    Prerequisite: run scripts/08b_label_phases.py before this script.
     """
-    pattern_map = {
-        "with": "timeline_daily_aggregated_with_anchors_*.csv",
-        "without": "timeline_daily_aggregated_no_anchors_*.csv",
-        "any": "timeline_daily_aggregated_*.csv",
-    }
-    pattern = pattern_map.get(anchors, pattern_map["with"])
     path = find_latest_file(interim_dir, pattern)
-    # Fallback: try generic pattern if specific variant not found
-    if path is None and anchors != "any":
-        path = find_latest_file(interim_dir, "timeline_daily_aggregated_*.csv")
     if path is None:
         raise FileNotFoundError(
-            "No timeline_daily_aggregated_*.csv found in data/interim/. "
-            "Run scripts/06_aggregate_and_normalize.py first."
+            f"No {pattern} found in data/interim/. "
+            "Run scripts/08b_label_phases.py first."
         )
-    logging.info(f"Loading daily aggregated timeline: {path.name}")
+    logging.info(f"Loading phase-labeled timeline: {path.name}")
     df = pd.read_csv(path, encoding="utf-8-sig", low_memory=False)
     logging.info(f"  {len(df):,} user-days from {df['author'].nunique():,} users")
-    return df
-
-
-def build_user_period_map(interim_dir: Path, min_consensus_features: int = 0, consensus_file: str | None = None) -> dict[str, float]:
-    """Build {user → cycle_length_days} strictly from step-07 periodicity results.
-
-    Only users with a DETECTED (statistically significant) period are included.
-    Users without a detected period are excluded — their phase labels would be
-    unreliable guesses based on an assumed cycle length.
-
-    Args:
-        min_consensus_features: If > 0 and the file has an 'n_features_agreeing'
-            column, keep only users where that many features agreed on the period.
-            Higher values → fewer but more reliable users.
-
-    Source preference:
-      1. consensus_periods_*.csv  with 'consensus_period' column
-      2. feature_periodicity_*.csv / periodicity_results_*.csv  (median per user)
-    """
-    if consensus_file:
-        results_path = Path(consensus_file) if Path(consensus_file).exists() else interim_dir / consensus_file
-    else:
-        results_path = find_periodicity_results(interim_dir)
-    if results_path is None:
-        return {}
-
-    logging.info(f"Loading periodicity results: {results_path.name}")
-    pdf = pd.read_csv(results_path, encoding="utf-8-sig", low_memory=False)
-
-    # Case 1: consensus file with a single period per user
-    if "consensus_period" in pdf.columns and "user" in pdf.columns:
-        valid = pdf[pdf["consensus_period"].notna()].copy()
-        if min_consensus_features > 0 and "n_features_agreeing" in valid.columns:
-            before = len(valid)
-            valid = valid[valid["n_features_agreeing"] >= min_consensus_features]
-            logging.info(
-                f"  Strict consensus filter (n_features_agreeing >= {min_consensus_features}): "
-                f"{before:,} → {len(valid):,} users"
-            )
-        user_period_map = dict(
-            zip(valid["user"].astype(str), valid["consensus_period"].astype(float))
-        )
-        logging.info(f"  Detected periods for {len(user_period_map):,} users (consensus)")
-        return user_period_map
-
-    # Case 2: long-format results — take median period per user across features
-    if "user" in pdf.columns and "period" in pdf.columns:
-        medians = pdf.groupby("user")["period"].median().reset_index()
-        user_period_map = dict(
-            zip(medians["user"].astype(str), medians["period"].astype(float))
-        )
-        logging.info(f"  Detected periods for {len(user_period_map):,} users (median)")
-        return user_period_map
-
-    logging.error("Periodicity file missing expected columns (user / consensus_period / period).")
-    return {}
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# 2. PHASE LABELLING
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def label_days_with_phase(
-    df: pd.DataFrame,
-    user_period_map: dict[str, float],
-    max_offset: int = 0,
-) -> pd.DataFrame:
-    """Filter to detected-period users and label each user-day with its phase.
-
-    Uses the project's existing adaptive-phase logic so that boundaries are
-    biologically consistent with the rest of the pipeline (follicular length
-    adapts to each user's detected cycle length).
-
-    Args:
-        df: Daily-aggregated DataFrame with 'author' and 'offset_from_cd1'.
-        user_period_map: {user → cycle_length_days} for detected-period users.
-        max_offset: If > 0, keep only days where |offset_from_cd1| <= max_offset.
-            Restricting to e.g. ±60 days of the anchor post reduces cumulative
-            cycle drift and makes phase labels much more accurate.
-    """
-    if not user_period_map:
-        raise RuntimeError(
-            "user_period_map is empty. Run scripts/07_run_fft_analysis.py first."
-        )
-
-    # Keep only users with a statistically detected cycle
-    df = df[df["author"].astype(str).isin(user_period_map)].copy()
-    df["author"] = df["author"].astype(str)
-    logging.info(
-        f"  After filtering to detected-period users: "
-        f"{len(df):,} user-days, {df['author'].nunique():,} users"
-    )
-
-    # Restrict time window to reduce phase-label drift
-    if max_offset > 0:
-        before = len(df)
-        df = df[df["offset_from_cd1"].abs() <= max_offset].copy()
-        logging.info(
-            f"  Time window filter (|offset| <= {max_offset} days): "
-            f"{before:,} → {len(df):,} user-days"
-        )
-
-    # Pre-compute per-user adaptive phase boundaries (4 rows per user)
-    user_period_map_filtered = {u: p for u, p in user_period_map.items() if u in set(df["author"])}
-    user_phase_df = compute_user_phase_definitions(user_period_map_filtered)
-
-    # Vectorised phase assignment using offset_from_cd1
-    df = assign_phases_to_timeline(
-        timeline_df=df,
-        user_phase_df=user_phase_df,
-        user_col="author",
-        time_col="offset_from_cd1",
-    )
-
-    before = len(df)
-    df = df[df["phase"].notna() & df["phase"].isin(PHASE_ORDER)].copy()
-    if before - len(df):
-        logging.warning(f"  Dropped {before - len(df):,} user-days with unassignable phase")
-
-    logging.info(f"  Phase distribution (user-day level):\n{df['phase'].value_counts().to_string()}")
+    if "phase" not in df.columns:
+        raise ValueError("Loaded file is missing 'phase' column. Re-run 08b_label_phases.py.")
     return df
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 2a-extra. LUTEAL SPLIT
+# 2. FEATURE COMPUTATION
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def split_luteal_phase(df: pd.DataFrame, user_period_map: dict) -> pd.DataFrame:
-    """Relabel 'Luteal' days into 'EarlyLuteal' (first 7d) and 'LateLuteal' (last 7d).
-
-    Uses each user's detected cycle length to find luteal_start, then splits
-    the 14-day luteal window at the midpoint (day 7).
-    """
-    df = df.copy()
-    luteal_mask = df["phase"] == "Luteal"
-    if luteal_mask.sum() == 0:
-        return df
-
-    # Build per-user luteal_start lookup
-    from src.analysis import create_adaptive_phases
-    luteal_start_map = {}
-    for user, period in user_period_map.items():
-        phases = create_adaptive_phases(period)
-        luteal_start_map[str(user)] = phases["Luteal"][0]
-
-    cycle_len_map = {str(u): p for u, p in user_period_map.items()}
-
-    def relabel(row):
-        user = str(row["author"])
-        if user not in luteal_start_map:
-            return row["phase"]
-        cycle_len = cycle_len_map[user]
-        day_in_cycle = row["offset_from_cd1"] % cycle_len
-        days_into_luteal = day_in_cycle - luteal_start_map[user]
-        return "EarlyLuteal" if days_into_luteal < 7 else "LateLuteal"
-
-    df.loc[luteal_mask, "phase"] = df[luteal_mask].apply(relabel, axis=1)
-
-    early = (df["phase"] == "EarlyLuteal").sum()
-    late  = (df["phase"] == "LateLuteal").sum()
-    logging.info(f"  Luteal split: {early:,} EarlyLuteal days, {late:,} LateLuteal days")
-    return df
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# 2b. PHASE-PROFILE AGGREGATION
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def aggregate_to_phase_profiles(df: pd.DataFrame, zscore_cols: list[str]) -> pd.DataFrame:
-    """Collapse day-level rows to one averaged feature vector per (user, phase).
-
-    Instead of predicting from a single noisy day, each sample becomes a user's
-    mean linguistic profile *across all days* in a given phase.  This matches
-    exactly what the bar charts show and removes within-phase day-to-day noise.
-
-    Result: ~N_users × 4 rows (one per user-phase pair that has data).
-    GroupKFold is still keyed on author so all four phase rows for a user
-    stay together in either train or test.
-    """
-    logging.info("  Aggregating day-level rows → per-user phase profiles…")
-    profiles = (
-        df.groupby(["author", "phase"])[zscore_cols]
-        .mean()
-        .reset_index()
-    )
-    # Fill any NaN means with 0 (= user's own mean, since features are z-scored)
-    profiles[zscore_cols] = profiles[zscore_cols].fillna(0)
-    n_users = profiles["author"].nunique()
-    logging.info(f"  {len(profiles):,} phase profiles from {n_users:,} users "
-                 f"(avg {len(profiles)/n_users:.1f} phases/user)")
-    return profiles
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# 3. FEATURE SELECTION
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def compute_and_select_zscore_features(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+def compute_zscore_features(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     """Compute per-user z-scores from the _mean columns and return the zscore column names.
 
     Step 06 produces {feature}_mean columns (daily averages per user-day) but does
-    not write z-score columns.  We compute them here using
-    normalize_features_per_user_zscore() from src/analysis.py, which normalises
-    each feature relative to that user's own mean and std across all their days.
+    not write z-score columns.  We compute them here via
+    normalize_features_per_user_zscore(), which normalises each feature relative
+    to that user's own mean and std across all their days.
 
     Per-user z-scores remove inter-individual baseline differences so the model
     learns how a user's language deviates from their personal mean across phases,
     not who the person is.
 
-    No PCA or dimensionality reduction is applied so that original feature names
-    are preserved in tree decision rules and SHAP plots.
+    No dimensionality reduction is applied so that original feature names are
+    preserved in SHAP plots.
     """
     mean_cols = [
         c for c in df.columns
@@ -374,56 +153,16 @@ def compute_and_select_zscore_features(df: pd.DataFrame) -> tuple[pd.DataFrame, 
     logging.info(f"  {len(zscore_cols)} _zscore feature columns ready")
     return df, zscore_cols
 
-
-def select_top_features_by_anova(
-    df: pd.DataFrame,
-    zscore_cols: list[str],
-    n_features: int,
-    binary_phase: str = "",
-) -> list[str]:
-    """Rank features by F-statistic and return top N.
-
-    When binary_phase is set, uses a binary t-test (target phase vs rest)
-    so that features are ranked specifically for discriminating that phase —
-    not diluted by how well they separate the other three phases from each other.
-
-    When binary_phase is empty, uses one-way ANOVA across all 4 phases.
-
-    NaN values are imputed with 0 (= user's personal mean) before scoring.
-    Features with zero variance are assigned F=0 and ranked last.
-    """
-    if n_features <= 0 or n_features >= len(zscore_cols):
-        logging.info(f"  Keeping all {len(zscore_cols)} features (n_features={n_features})")
-        return zscore_cols
-
-    X = df[zscore_cols].fillna(0).values.astype(np.float32)
-
-    if binary_phase:
-        y_sel = (df["phase"] == binary_phase).astype(int).values
-        label_desc = f"binary ({binary_phase} vs rest)"
-    else:
-        y_sel = LabelEncoder().fit_transform(df["phase"])
-        label_desc = "4-class ANOVA"
-
-    f_stats, _ = f_classif(X, y_sel)
-    f_stats = np.nan_to_num(f_stats, nan=0.0)
-
-    ranked = sorted(zip(zscore_cols, f_stats), key=lambda t: t[1], reverse=True)
-    selected = [col for col, _ in ranked[:n_features]]
-
-    logging.info(f"\n  Top {n_features} features by {label_desc} F-statistic:")
-    for col, f in ranked[:n_features]:
-        logging.info(f"    {f:8.2f}  {col}")
-
-    return selected
-
-
 # ═══════════════════════════════════════════════════════════════════════════════
-# 4. ML ARRAYS AND GROUP-AWARE CV
+# 3. ML ARRAYS AND GROUP-AWARE CV
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def make_arrays(df: pd.DataFrame, feature_cols: list[str], binary_phase: str = ""):
-    """Extract X, y (int-encoded), groups, and the LabelEncoder.
+    """Convert labeled DataFrame to (X, y_int, groups, LabelEncoder) for sklearn.
+
+    groups = author ids, passed to GroupKFold so that all days from one user
+    land entirely on the same side of every train/test split — preventing
+    within-user correlation from leaking across folds.
 
     Args:
         binary_phase: If non-empty (e.g. "Menstrual"), collapse labels to
@@ -449,30 +188,30 @@ def make_arrays(df: pd.DataFrame, feature_cols: list[str], binary_phase: str = "
     groups = df["author"].values
     return X, y, groups, le
 
-
 def compute_sample_weights(y: np.ndarray) -> np.ndarray:
     """Compute inverse-frequency sample weights for class balancing.
 
-    Phases differ greatly in length (Luteal ~14 days vs Ovulation ~3 days),
-    so the dataset is structurally imbalanced.  RandomForest accepts
-    class_weight="balanced" directly; XGBoost requires explicit sample_weight
-    passed to fit().  This function produces per-sample weights that give each
-    class equal total weight regardless of how many days it contains.
+    Phases are structurally imbalanced: Luteal lasts ~14 days per cycle,
+    Ovulation only ~3 days.  Unweighted training would bias the model toward
+    the Luteal class.  These weights give each class equal total gradient
+    influence during XGBoost training, regardless of how many days it contains.
+    (XGBoost requires explicit sample_weight at fit() time; it cannot use
+    class_weight="balanced" like sklearn estimators.)
     """
     from sklearn.utils.class_weight import compute_sample_weight
     return compute_sample_weight("balanced", y)
-
 
 def oof_predictions(model, X, y, groups, n_folds: int) -> np.ndarray:
     """Out-of-fold predictions with GroupKFold on author.
 
     All user-days from the same user stay entirely in either train or test.
     This is mandatory because days from the same user share the same writing
-    style, cycle trajectory, and vocabulary — they are not independent.
+    style, cycle trajectory, and vocabulary — they are not independent samples.
 
-    We implement the fold loop manually (rather than cross_val_predict) so we
-    can pass sample_weight directly to fit() on each fold — sklearn 1.6+ removed
-    the fit_params argument from cross_val_predict in favour of metadata routing.
+    The fold loop is implemented manually (rather than cross_val_predict) so
+    sample_weight can be passed to fit() on each fold.  sklearn 1.6+ removed
+    the fit_params argument from cross_val_predict in favour of metadata routing,
+    which XGBoost does not support.
     """
     gkf = GroupKFold(n_splits=n_folds)
     sample_weights = compute_sample_weights(y)
@@ -489,93 +228,34 @@ def oof_predictions(model, X, y, groups, n_folds: int) -> np.ndarray:
 
     return y_pred, y_proba
 
-
 # ═══════════════════════════════════════════════════════════════════════════════
-# 5. MODEL 1 — DECISION TREE
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def train_and_evaluate_tree(X, y, groups, feature_names, label_encoder, n_folds, max_depth, output_dir, timestamp):
-    logging.info(f"\n{'='*60}")
-    logging.info(f"MODEL 1 — DecisionTree (max_depth={max_depth})")
-    logging.info(f"{'='*60}")
-
-    tree = DecisionTreeClassifier(
-        max_depth=max_depth,
-        class_weight="balanced",
-        random_state=42,
-    )
-    y_pred, y_proba = oof_predictions(tree, X, y, groups, n_folds)
-
-    report = classification_report(y, y_pred, target_names=label_encoder.classes_, digits=3)
-    logging.info(f"\nOOF Report:\n{report}")
-    _log_auc(y, y_proba, label_encoder)
-
-    rpt_path = output_dir / f"classification_report_tree_depth{max_depth}_{timestamp}.txt"
-    rpt_path.write_text(
-        f"DecisionTree (max_depth={max_depth}) | GroupKFold OOF ({n_folds} folds)\n\n{report}"
-    )
-
-    # Fit on full data to visualise the complete clinical rule set
-    tree.fit(X, y)
-
-    fig_w = max(20, 2 ** max_depth * 3)
-    fig_h = max(10, max_depth * 4)
-    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
-    plot_tree(
-        tree,
-        feature_names=feature_names,
-        class_names=label_encoder.classes_,
-        filled=True,
-        rounded=True,
-        impurity=True,
-        proportion=False,
-        fontsize=9,
-        ax=ax,
-    )
-    ax.set_title(
-        f"Decision Tree (max_depth={max_depth}) — Menstrual Phase Classifier\n"
-        f"GroupKFold OOF Macro-F1 = {_macro_f1(y, y_pred):.3f}",
-        fontsize=13, fontweight="bold",
-    )
-    plt.tight_layout()
-    plot_path = output_dir / f"decision_tree_depth{max_depth}_{timestamp}.png"
-    fig.savefig(plot_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    logging.info(f"  Tree plot → {plot_path.name}")
-    return tree
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# 6. MODEL 2 — ENSEMBLE
+# 4. MODEL — XGBOOST ENSEMBLE
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def build_ensemble(n_classes: int):
-    if XGBOOST_AVAILABLE:
-        return XGBClassifier(
-            objective="multi:softprob",
-            num_class=n_classes,
-            n_estimators=300,
-            max_depth=6,
-            learning_rate=0.05,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            eval_metric="mlogloss",
-            random_state=42,
-            n_jobs=-1,
-            verbosity=0,
-        )
-    return RandomForestClassifier(
+def build_ensemble(n_classes: int) -> XGBClassifier:
+    """Build a multiclass XGBoost classifier.
+
+    XGBoost outperforms RandomForest on this task (Macro AUC ~0.75 vs lower RF
+    baseline) and is the only supported model.  Install xgboost if missing.
+    """
+    return XGBClassifier(
+        objective="multi:softprob",
+        num_class=n_classes,
         n_estimators=300,
-        class_weight="balanced",
+        max_depth=6,
+        learning_rate=0.05,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        eval_metric="mlogloss",
         random_state=42,
         n_jobs=-1,
+        verbosity=0,
     )
 
 
 def train_and_evaluate_ensemble(X, y, groups, feature_names, label_encoder, n_folds, output_dir, timestamp):
-    model_name = "XGBoostClassifier" if XGBOOST_AVAILABLE else "RandomForestClassifier"
     logging.info(f"\n{'='*60}")
-    logging.info(f"MODEL 2 — {model_name}")
+    logging.info("MODEL — XGBoostClassifier")
     logging.info(f"{'='*60}")
 
     n_classes = len(label_encoder.classes_)
@@ -587,7 +267,7 @@ def train_and_evaluate_ensemble(X, y, groups, feature_names, label_encoder, n_fo
     _log_auc(y, y_proba, label_encoder)
 
     rpt_path = output_dir / f"classification_report_ensemble_{timestamp}.txt"
-    rpt_path.write_text(f"{model_name} | GroupKFold OOF ({n_folds} folds)\n\n{report}")
+    rpt_path.write_text(f"XGBoostClassifier | GroupKFold OOF ({n_folds} folds)\n\n{report}")
 
     # Confusion matrix — shows which phases the model confuses most
     cm = confusion_matrix(y, y_pred, labels=list(range(n_classes)))
@@ -596,7 +276,7 @@ def train_and_evaluate_ensemble(X, y, groups, feature_names, label_encoder, n_fo
         ax=ax, cmap="Blues", colorbar=True
     )
     ax.set_title(
-        f"{model_name} — Confusion Matrix\n"
+        f"XGBoostClassifier — Confusion Matrix\n"
         f"GroupKFold OOF ({n_folds} folds) | Macro-F1 = {_macro_f1(y, y_pred):.3f}",
         fontsize=11,
     )
@@ -690,7 +370,72 @@ def run_shap_analysis(model, X, feature_names, label_encoder, output_dir, timest
 # 6b. OVR ENSEMBLE
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def train_ovr_ensemble(X, y, groups, feature_names, label_encoder, n_folds, output_dir, timestamp):
+def load_consistency_map(
+    reports_dir: Path,
+    threshold: float,
+    feature_names: list[str],
+    phases: list[str],
+    min_features: int = 3,
+) -> dict[str, list[int]]:
+    """Load phase_peak_summary CSV (script 10 output) and return
+    {phase → [col_indices_in_feature_names]} for features where
+    pct_consistent >= threshold in that phase.
+
+    feature_names are zscore column names like 'readability_zscore'.
+    CSV has base names like 'readability'. Mapping: strip '_zscore' suffix.
+
+    Falls back to all features for a phase if fewer than min_features pass.
+    """
+    candidates = sorted((reports_dir / "phase_distributions").glob("phase_peak_summary_*.csv"))
+    if not candidates:
+        logging.warning("  No phase_peak_summary_*.csv found — consistency filter disabled.")
+        return {}
+
+    csv_path = candidates[-1]
+    logging.info(f"  Loading consistency map from: {csv_path.name}")
+    summary = pd.read_csv(csv_path)
+
+    # Build lookup: base_name → row
+    summary_map = {row["feature"]: row for _, row in summary.iterrows()}
+
+    # Strip _zscore suffix from feature_names to get base names
+    def base_name(fn: str) -> str:
+        return fn.replace("_zscore", "").replace("_mean", "")
+
+    consistency_map = {}
+    for phase in phases:
+        col = f"{phase}_pct_consistent"
+        if col not in summary.columns:
+            logging.warning(f"  {phase}: column '{col}' not in summary — skipping")
+            continue
+
+        indices = []
+        for idx, fn in enumerate(feature_names):
+            bn = base_name(fn)
+            if bn in summary_map:
+                pct = summary_map[bn].get(col, float("nan"))
+                if pd.notna(pct) and pct >= threshold:
+                    indices.append(idx)
+
+        if len(indices) < min_features:
+            logging.warning(
+                f"  {phase}: only {len(indices)} features >= {threshold:.0f}% "
+                f"(need {min_features}) — using all {len(feature_names)} features"
+            )
+            indices = list(range(len(feature_names)))
+
+        consistency_map[phase] = indices
+        feat_labels = [feature_names[i] for i in indices[:5]]
+        logging.info(
+            f"  {phase}: {len(indices)} consistent features >= {threshold:.0f}%  "
+            f"(top: {', '.join(feat_labels)}{'…' if len(indices) > 5 else ''})"
+        )
+
+    return consistency_map
+
+
+def train_ovr_ensemble(X, y, groups, feature_names, label_encoder, n_folds, output_dir, timestamp,
+                       consistency_map: dict | None = None):
     """Train one binary XGBoost per phase (OvR) with shared GroupKFold splits.
 
     All classifiers use the exact same fold splits so the OOF probability
@@ -699,9 +444,8 @@ def train_ovr_ensemble(X, y, groups, feature_names, label_encoder, n_folds, outp
 
     Returns the stacked normalised OOF probability matrix.
     """
-    model_name = "XGBoostClassifier (OvR)" if XGBOOST_AVAILABLE else "RandomForest (OvR)"
     logging.info(f"\n{'='*60}")
-    logging.info(f"MODEL 2b — {model_name}")
+    logging.info("MODEL 2b — XGBoostClassifier (OvR)")
     logging.info(f"{'='*60}")
 
     phases = label_encoder.classes_
@@ -719,34 +463,38 @@ def train_ovr_ensemble(X, y, groups, feature_names, label_encoder, n_folds, outp
         pos_n, neg_n = y_binary.sum(), (y_binary == 0).sum()
         scale_w = neg_n / max(pos_n, 1)
 
-        if XGBOOST_AVAILABLE:
-            model = XGBClassifier(
-                objective="binary:logistic",
-                n_estimators=300,
-                max_depth=6,
-                learning_rate=0.05,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                scale_pos_weight=scale_w,
-                eval_metric="logloss",
-                random_state=42,
-                n_jobs=-1,
-                verbosity=0,
-            )
+        # Phase-specific feature subset (consistency filter)
+        if consistency_map and phase in consistency_map:
+            feat_idx = consistency_map[phase]
+            X_phase = X[:, feat_idx]
+            n_feats_used = len(feat_idx)
         else:
-            model = RandomForestClassifier(
-                n_estimators=300, class_weight="balanced", random_state=42, n_jobs=-1
-            )
+            X_phase = X
+            n_feats_used = X.shape[1]
+
+        model = XGBClassifier(
+            objective="binary:logistic",
+            n_estimators=300,
+            max_depth=6,
+            learning_rate=0.05,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            scale_pos_weight=scale_w,
+            eval_metric="logloss",
+            random_state=42,
+            n_jobs=-1,
+            verbosity=0,
+        )
 
         y_proba_phase = np.zeros(len(y_binary))
         for train_idx, test_idx in fold_splits:
             m = clone(model)
-            m.fit(X[train_idx], y_binary[train_idx])
-            y_proba_phase[test_idx] = m.predict_proba(X[test_idx])[:, 1]
+            m.fit(X_phase[train_idx], y_binary[train_idx])
+            y_proba_phase[test_idx] = m.predict_proba(X_phase[test_idx])[:, 1]
 
         auc = roc_auc_score(y_binary, y_proba_phase)
         phase_aucs[phase] = auc
-        logging.info(f"  {phase:<12}: AUC {auc:.3f}  (pos={pos_n}, neg={neg_n})")
+        logging.info(f"  {phase:<12}: AUC {auc:.3f}  (pos={pos_n}, neg={neg_n}, feats={n_feats_used})")
         ovr_probas[:, i] = y_proba_phase
 
     # Normalise rows so probabilities sum to 1 (enables multiclass AUC)
@@ -758,7 +506,7 @@ def train_ovr_ensemble(X, y, groups, feature_names, label_encoder, n_folds, outp
     logging.info(f"\n  OvR ensemble macro AUC: {macro_auc:.3f}  [random=0.500]")
 
     # Save text report
-    lines = [f"{model_name} | GroupKFold ({n_folds} folds)\n"]
+    lines = [f"XGBoostClassifier (OvR) | GroupKFold ({n_folds} folds)\n"]
     for ph, auc in phase_aucs.items():
         lines.append(f"  {ph:<12}: AUC {auc:.3f}")
     lines.append(f"\n  Ensemble macro AUC: {macro_auc:.3f}")
@@ -772,7 +520,7 @@ def train_ovr_ensemble(X, y, groups, feature_names, label_encoder, n_folds, outp
     ax.axhline(0.5, color="k", linestyle="--", lw=1, label="Chance (0.5)")
     ax.axhline(macro_auc, color="tomato", linestyle="-", lw=1.5, label=f"Ensemble macro ({macro_auc:.3f})")
     ax.set_ylabel("AUC-ROC")
-    ax.set_title(f"OvR Per-Phase AUC — {model_name}\nGroupKFold ({n_folds} folds)")
+    ax.set_title(f"OvR Per-Phase AUC — XGBoostClassifier\nGroupKFold ({n_folds} folds)")
     ax.set_ylim(0.4, 1.0)
     ax.legend()
     plt.tight_layout()
@@ -822,31 +570,10 @@ def _log_auc(y_true, y_proba, label_encoder) -> None:
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", default="configs/base.yaml")
-    p.add_argument("--tree-depth", type=int, default=4, choices=[3, 4, 5, 6, 7])
-    p.add_argument(
-        "--n-features", type=int, default=20,
-        help="Select top N features by ANOVA F-statistic before training. 0 = use all.",
-    )
     p.add_argument("--n-folds", type=int, default=5,
                    help="GroupKFold splits — each fold holds out all days of some users.")
     p.add_argument("--shap-max-display", type=int, default=20)
     p.add_argument("--skip-shap", action="store_true")
-    p.add_argument(
-        "--anchors",
-        choices=["with", "without", "any"],
-        default="with",
-        help="Which timeline variant to use: 'with' (with_anchors, default), 'without' (no_anchors), or 'any' (latest).",
-    )
-    p.add_argument(
-        "--max-offset", type=int, default=0,
-        help="Keep only days within ±N days of the anchor post. 0 = no limit. "
-             "Recommended: 60 (2 cycles) or 30 (1 cycle) to reduce phase-label drift.",
-    )
-    p.add_argument(
-        "--min-consensus-features", type=int, default=0,
-        help="Keep only consensus users where n_features_agreeing >= N. "
-             "0 = keep all. Try 40 for stricter, more reliable cycle lengths.",
-    )
     p.add_argument(
         "--binary-phase",
         choices=["", "Menstrual", "Follicular", "Ovulation", "Luteal"],
@@ -855,25 +582,21 @@ def parse_args():
              "Recommended: 'Menstrual' or 'Ovulation'.",
     )
     p.add_argument(
-        "--consensus-file", default=None,
-        help="Path or filename (in interim dir) of a specific consensus CSV to use.",
-    )
-    p.add_argument(
         "--aggregate-by-phase", action="store_true",
         help="Collapse day-level rows to one averaged feature vector per (user, phase) "
              "before training. Reduces noise — each sample is a user's mean profile for "
              "a phase, not a single day.",
     )
     p.add_argument(
-        "--split-luteal", action="store_true",
-        help="Split Luteal into EarlyLuteal (first 7d) and LateLuteal (last 7d). "
-             "Use with --aggregate-by-phase to test whether late luteal is negative.",
+        "--ovr", action="store_true",
+        help="Train one binary XGBoost per phase (One-vs-Rest) with shared GroupKFold "
+             "splits, then report per-phase AUC and ensemble macro AUC.",
     )
     p.add_argument(
-        "--ovr", action="store_true",
-        help="Train one binary classifier per phase (One-vs-Rest) with shared GroupKFold "
-             "splits, then report per-phase AUC and ensemble macro AUC. "
-             "Runs in addition to the standard multiclass model.",
+        "--consistency-filter", type=float, default=0.0, metavar="THRESHOLD",
+        help="If > 0, filter features per phase in the OvR classifier to only those "
+             "where pct_consistent >= THRESHOLD (0-100) from script 10's summary CSV. "
+             "Requires reports/phase_distributions/phase_peak_summary_*.csv to exist.",
     )
     p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args()
@@ -890,61 +613,42 @@ def main():
 
     cfg = load_config(args.config)
     interim_dir = Path(cfg["paths"]["interim"])
+    files_cfg = cfg["paths"]["files"]
 
     output_dir = ROOT / "reports" / "ml"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── [1] Load daily aggregated timeline (step 06) ───────────────────────────
-    logging.info("\n[1/7] Loading daily aggregated timeline (step 06)…")
-    df = load_daily_aggregated(interim_dir, anchors=args.anchors)
+    # ── [1] Load phase-labeled timeline (step 08b output) ──────────────────────
+    logging.info("\n[1/5] Loading phase-labeled timeline (step 08b)…")
+    df = load_phase_labeled(interim_dir, files_cfg["phase_labeled"] + "_*.csv")
 
-    # ── [2] Build user → period map (step 07, detected users only) ─────────────
-    logging.info("\n[2/7] Loading detected cycle lengths (step 07)…")
-    user_period_map = build_user_period_map(interim_dir, min_consensus_features=args.min_consensus_features, consensus_file=args.consensus_file)
-    if not user_period_map:
-        logging.error("No periodicity results found. Run scripts/07_run_fft_analysis.py first.")
-        sys.exit(1)
+    # ── [2] Compute per-user z-scores from _mean columns ───────────────────────
+    # Must happen before any aggregation so each user's mean/std is computed
+    # over their complete set of labeled days.
+    logging.info("\n[2/5] Computing per-user z-score features from _mean columns…")
+    df, zscore_cols = compute_zscore_features(df)
 
-    # ── [3] Compute per-user z-scores on the FULL timeline BEFORE any filtering ─
-    # Must happen before label_days_with_phase() so that each user's mean/std is
-    # computed over their complete set of days, not a phase-filtered subset.
-    logging.info("\n[3/7] Computing per-user z-score features from _mean columns…")
-    df, zscore_cols = compute_and_select_zscore_features(df)
-
-    # ── [4] Filter to detected users, apply time window, assign phase ───────────
-    logging.info("\n[4/7] Filtering to detected-period users and assigning phases…")
-    df = label_days_with_phase(df, user_period_map, max_offset=args.max_offset)
-
-    # ── [4c] Optionally split Luteal into Early/Late ────────────────────────────
-    if args.split_luteal:
-        logging.info("\n[4c/7] Splitting Luteal into EarlyLuteal / LateLuteal…")
-        df = split_luteal_phase(df, user_period_map)
-        # Patch module-level PHASE_ORDER so label encoder and filters use 5-class set
-        globals()["PHASE_ORDER"] = PHASE_ORDER_SPLIT_LUTEAL
-
-    # ── [4b] Optionally aggregate to per-user phase profiles ───────────────────
+    # ── [3] Optionally aggregate to per-user phase profiles ────────────────────
     if args.aggregate_by_phase:
-        logging.info("\n[4b/7] Aggregating to per-user phase profiles…")
+        logging.info("\n[3/5] Aggregating to per-user phase profiles…")
         df = aggregate_to_phase_profiles(df, zscore_cols)
 
-    # ── [5] Save labelled daily dataset ────────────────────────────────────────
-    logging.info("\n[5/7] Saving labelled user-day dataset…")
-    save_cols = ["author", "phase"] + [c for c in ["offset_from_cd1", "subreddit", "ts_date"] if c in df.columns] + zscore_cols
+    # ── [4] Save labelled dataset ───────────────────────────────────────────────
+    logging.info("\n[4/5] Saving labelled user-day dataset…")
+    save_cols = (
+        ["author", "phase"]
+        + [c for c in ["offset_from_cd1", "subreddit", "ts_date"] if c in df.columns]
+        + zscore_cols
+    )
     saved_path = save_with_timestamp(
         df[[c for c in save_cols if c in df.columns]],
         interim_dir,
-        "ml_labeled_days",
+        files_cfg["ml_labeled_days"],
     )
     logging.info(f"  Saved → {saved_path}")
 
-    # ── Feature selection by ANOVA F-statistic ──────────────────────────────────
-    logging.info(f"\n  Selecting top {args.n_features} features…")
-    selected_features = select_top_features_by_anova(
-        df, zscore_cols, args.n_features, binary_phase=args.binary_phase
-    )
-
     # ── Build ML arrays ─────────────────────────────────────────────────────────
-    X, y, groups, label_encoder = make_arrays(df, selected_features, binary_phase=args.binary_phase)
+    X, y, groups, label_encoder = make_arrays(df, zscore_cols, binary_phase=args.binary_phase)
     n_unique_users = len(np.unique(groups))
     median_days = int(np.median(np.unique(groups, return_counts=True)[1]))
     logging.info(
@@ -956,38 +660,49 @@ def main():
         logging.warning(f"Only {n_unique_users} users — reducing n_folds to {n_unique_users}")
         args.n_folds = n_unique_users
 
-    # ── [6] Model 1 — Decision Tree ────────────────────────────────────────────
-    logging.info("\n[6/7] Decision Tree baseline…")
-    train_and_evaluate_tree(
-        X, y, groups, selected_features, label_encoder,
-        args.n_folds, args.tree_depth, output_dir, timestamp,
-    )
-
-    # ── [7] Model 2 — Ensemble + SHAP ──────────────────────────────────────────
-    logging.info("\n[7/7] Ensemble model…")
+    # ── [5] XGBoost Ensemble + SHAP ────────────────────────────────────────────
+    logging.info("\n[5/5] XGBoost ensemble…")
     ensemble = train_and_evaluate_ensemble(
-        X, y, groups, selected_features, label_encoder,
+        X, y, groups, zscore_cols, label_encoder,
         args.n_folds, output_dir, timestamp,
     )
 
     if not args.skip_shap:
         run_shap_analysis(
-            ensemble, X, selected_features, label_encoder,
+            ensemble, X, zscore_cols, label_encoder,
             output_dir, timestamp, args.shap_max_display,
         )
     else:
         logging.info("  SHAP skipped.")
 
-    # ── [7b] Optional OvR ensemble ──────────────────────────────────────────────
+    # ── [5b] Optional OvR ensemble ──────────────────────────────────────────────
     if args.ovr:
         if args.binary_phase:
             logging.warning("--ovr is ignored when --binary-phase is set (already binary).")
         else:
-            logging.info("\n[7b] OvR ensemble (one binary classifier per phase)…")
+            logging.info("\n[5b] OvR ensemble — baseline (all features)…")
             train_ovr_ensemble(
-                X, y, groups, selected_features, label_encoder,
+                X, y, groups, zscore_cols, label_encoder,
                 args.n_folds, output_dir, timestamp,
             )
+
+            if args.consistency_filter > 0:
+                logging.info(
+                    f"\n[5c] OvR ensemble — consistency filter "
+                    f"(pct_consistent >= {args.consistency_filter:.0f}%)…"
+                )
+                consistency_map = load_consistency_map(
+                    reports_dir=ROOT / "reports",
+                    threshold=args.consistency_filter,
+                    feature_names=zscore_cols,
+                    phases=list(label_encoder.classes_),
+                )
+                ts_filtered = timestamp + "_filtered"
+                train_ovr_ensemble(
+                    X, y, groups, zscore_cols, label_encoder,
+                    args.n_folds, output_dir, ts_filtered,
+                    consistency_map=consistency_map,
+                )
 
     logging.info(f"\nAll outputs → {output_dir}/")
     logging.info("Done.")
