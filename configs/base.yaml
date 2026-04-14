@@ -47,6 +47,7 @@ paths:
     consensus_periods: consensus_periods
     phase_labeled: timeline_phase_labeled
     ml_labeled_days: ml_labeled_days
+    phase_peak_summary: phase_peak_summary
 
 reddit:
   min_chars: 100

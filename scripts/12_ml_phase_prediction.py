@@ -94,42 +94,16 @@ PHASE_ORDER = ["Menstrual", "Follicular", "Ovulation", "Luteal"]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 1. DATA LOADING
+# 1. FEATURE COMPUTATION
 # ═══════════════════════════════════════════════════════════════════════════════
-
-def load_phase_labeled(interim_dir: Path, pattern: str) -> pd.DataFrame:
-    """Load the phase-labeled daily timeline produced by step 08b.
-
-    Row unit: ONE (user, cycle_day) pair, already filtered to detected-period
-    users and annotated with 'phase' (Menstrual/Follicular/Ovulation/Luteal).
-
-    Prerequisite: run scripts/08b_label_phases.py before this script.
-    """
-    path = find_latest_file(interim_dir, pattern)
-    if path is None:
-        raise FileNotFoundError(
-            f"No {pattern} found in data/interim/. "
-            "Run scripts/08b_label_phases.py first."
-        )
-    logging.info(f"Loading phase-labeled timeline: {path.name}")
-    df = pd.read_csv(path, encoding="utf-8-sig", low_memory=False)
-    logging.info(f"  {len(df):,} user-days from {df['author'].nunique():,} users")
-    if "phase" not in df.columns:
-        raise ValueError("Loaded file is missing 'phase' column. Re-run 08b_label_phases.py.")
-    return df
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# 2. FEATURE COMPUTATION
-# ═══════════════════════════════════════════════════════════════════════════════
-
 def compute_zscore_features(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     """Compute per-user z-scores from the _mean columns and return the zscore column names.
 
-    Step 06 produces {feature}_mean columns (daily averages per user-day) but does
-    not write z-score columns.  We compute them here via
-    normalize_features_per_user_zscore(), which normalises each feature relative
-    to that user's own mean and std across all their days.
+    Step 06 outputs {feature}_mean columns (daily mean per user-day). The "normalize"
+    in step 06's name means collapsing multiple posts per day into one row — not
+    z-scoring. Z-scores are computed here per user via normalize_features_per_user_zscore(),
+    which normalises each feature relative to that user's own mean and std across
+    all their days.
 
     Per-user z-scores remove inter-individual baseline differences so the model
     learns how a user's language deviates from their personal mean across phases,
@@ -154,9 +128,8 @@ def compute_zscore_features(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     return df, zscore_cols
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 3. ML ARRAYS AND GROUP-AWARE CV
+# 2. ML ARRAYS AND GROUP-AWARE CV
 # ═══════════════════════════════════════════════════════════════════════════════
-
 def make_arrays(df: pd.DataFrame, feature_cols: list[str], binary_phase: str = ""):
     """Convert labeled DataFrame to (X, y_int, groups, LabelEncoder) for sklearn.
 
@@ -195,8 +168,9 @@ def compute_sample_weights(y: np.ndarray) -> np.ndarray:
     Ovulation only ~3 days.  Unweighted training would bias the model toward
     the Luteal class.  These weights give each class equal total gradient
     influence during XGBoost training, regardless of how many days it contains.
-    (XGBoost requires explicit sample_weight at fit() time; it cannot use
-    class_weight="balanced" like sklearn estimators.)
+
+    XGBoost multiclass has no class_weight='balanced' — sample_weight must be
+    passed explicitly to fit() for each fold.
     """
     from sklearn.utils.class_weight import compute_sample_weight
     return compute_sample_weight("balanced", y)
@@ -229,16 +203,17 @@ def oof_predictions(model, X, y, groups, n_folds: int) -> np.ndarray:
     return y_pred, y_proba
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 4. MODEL — XGBOOST ENSEMBLE
+# 3. MODEL — XGBOOST ENSEMBLE
 # ═══════════════════════════════════════════════════════════════════════════════
+def train_and_evaluate_ensemble(X, y, groups, feature_names, label_encoder, n_folds, output_dir, timestamp):
+    logging.info(f"\n{'='*60}")
+    logging.info("MODEL — XGBoostClassifier")
+    logging.info(f"{'='*60}")
 
-def build_ensemble(n_classes: int) -> XGBClassifier:
-    """Build a multiclass XGBoost classifier.
-
-    XGBoost outperforms RandomForest on this task (Macro AUC ~0.75 vs lower RF
-    baseline) and is the only supported model.  Install xgboost if missing.
-    """
-    return XGBClassifier(
+    n_classes = len(label_encoder.classes_)
+    # objective="multi:softprob" outputs a probability distribution over all classes,
+    # required for predict_proba and for SHAP TreeExplainer to work correctly.
+    model = XGBClassifier(
         objective="multi:softprob",
         num_class=n_classes,
         n_estimators=300,
@@ -251,15 +226,6 @@ def build_ensemble(n_classes: int) -> XGBClassifier:
         n_jobs=-1,
         verbosity=0,
     )
-
-
-def train_and_evaluate_ensemble(X, y, groups, feature_names, label_encoder, n_folds, output_dir, timestamp):
-    logging.info(f"\n{'='*60}")
-    logging.info("MODEL — XGBoostClassifier")
-    logging.info(f"{'='*60}")
-
-    n_classes = len(label_encoder.classes_)
-    model = build_ensemble(n_classes)
     y_pred, y_proba = oof_predictions(model, X, y, groups, n_folds)
 
     report = classification_report(y, y_pred, target_names=label_encoder.classes_, digits=3)
@@ -293,9 +259,8 @@ def train_and_evaluate_ensemble(X, y, groups, feature_names, label_encoder, n_fo
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 7. SHAP EXPLAINABILITY
+# SHAP EXPLAINABILITY
 # ═══════════════════════════════════════════════════════════════════════════════
-
 def run_shap_analysis(model, X, feature_names, label_encoder, output_dir, timestamp, max_display=20):
     logging.info("\n  Computing SHAP values (TreeExplainer)…")
 
@@ -309,7 +274,9 @@ def run_shap_analysis(model, X, feature_names, label_encoder, output_dir, timest
     explainer = shap.TreeExplainer(model)
     shap_values = explainer.shap_values(X_shap)
 
-    # Normalise to (n_samples, n_features, n_classes)
+    # Normalise to (n_samples, n_features, n_classes).
+    # SHAP <0.40 returns a list of n_classes 2D arrays; SHAP >=0.40 returns a
+    # single 3D array. Both are handled here for compatibility.
     if isinstance(shap_values, list):
         shap_array = np.stack(shap_values, axis=-1)
     elif np.asarray(shap_values).ndim == 3:
@@ -367,14 +334,14 @@ def run_shap_analysis(model, X, feature_names, label_encoder, output_dir, timest
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 6b. OVR ENSEMBLE
+# OVR ENSEMBLE
 # ═══════════════════════════════════════════════════════════════════════════════
-
 def load_consistency_map(
     reports_dir: Path,
     threshold: float,
     feature_names: list[str],
     phases: list[str],
+    files_cfg: dict,
     min_features: int = 3,
 ) -> dict[str, list[int]]:
     """Load phase_peak_summary CSV (script 10 output) and return
@@ -386,7 +353,9 @@ def load_consistency_map(
 
     Falls back to all features for a phase if fewer than min_features pass.
     """
-    candidates = sorted((reports_dir / "phase_distributions").glob("phase_peak_summary_*.csv"))
+    phase_dist_dir = reports_dir / "phase_distributions"
+    summary_pattern = files_cfg["phase_peak_summary"] + "_*.csv"
+    candidates = sorted(phase_dist_dir.glob(summary_pattern))
     if not candidates:
         logging.warning("  No phase_peak_summary_*.csv found — consistency filter disabled.")
         return {}
@@ -433,14 +402,19 @@ def load_consistency_map(
 
     return consistency_map
 
-
 def train_ovr_ensemble(X, y, groups, feature_names, label_encoder, n_folds, output_dir, timestamp,
                        consistency_map: dict | None = None):
-    """Train one binary XGBoost per phase (OvR) with shared GroupKFold splits.
+    """Train one binary XGBoost per phase (One-vs-Rest) with shared GroupKFold splits.
 
-    All classifiers use the exact same fold splits so the OOF probability
-    vectors are aligned and can be stacked into a proper (n_samples, n_phases)
-    matrix for multiclass AUC computation.
+    One-vs-Rest means 4 separate binary classifiers: Menstrual vs rest,
+    Follicular vs rest, Ovulation vs rest, Luteal vs rest. Each gets its own
+    scale_pos_weight to handle class imbalance. All 4 share the same GroupKFold
+    splits so their OOF probability vectors are aligned and can be stacked into
+    an (n_samples, 4) matrix for multiclass AUC.
+
+    OvR is run in addition to the multiclass classifier because it yields
+    per-phase AUC scores, which are more interpretable than macro-F1 for
+    structurally imbalanced phases (Ovulation ~3 days vs Luteal ~14 days).
 
     Returns the stacked normalised OOF probability matrix.
     """
@@ -601,7 +575,6 @@ def parse_args():
     p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args()
 
-
 def main():
     args = parse_args()
     logging.basicConfig(
@@ -620,7 +593,17 @@ def main():
 
     # ── [1] Load phase-labeled timeline (step 08b output) ──────────────────────
     logging.info("\n[1/5] Loading phase-labeled timeline (step 08b)…")
-    df = load_phase_labeled(interim_dir, files_cfg["phase_labeled"] + "_*.csv")
+    path = find_latest_file(interim_dir, files_cfg["phase_labeled"] + "_*.csv")
+    if path is None:
+        raise FileNotFoundError(
+            "No timeline_phase_labeled_*.csv found in data/interim/. "
+            "Run scripts/08b_label_phases.py first."
+        )
+    logging.info(f"  Loading: {path.name}")
+    df = pd.read_csv(path, encoding="utf-8-sig", low_memory=False)
+    logging.info(f"  {len(df):,} user-days from {df['author'].nunique():,} users")
+    if "phase" not in df.columns:
+        raise ValueError("Missing 'phase' column. Re-run scripts/08b_label_phases.py.")
 
     # ── [2] Compute per-user z-scores from _mean columns ───────────────────────
     # Must happen before any aggregation so each user's mean/std is computed
@@ -696,6 +679,7 @@ def main():
                     threshold=args.consistency_filter,
                     feature_names=zscore_cols,
                     phases=list(label_encoder.classes_),
+                    files_cfg=files_cfg,
                 )
                 ts_filtered = timestamp + "_filtered"
                 train_ovr_ensemble(
