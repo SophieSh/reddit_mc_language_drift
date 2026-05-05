@@ -142,7 +142,11 @@ def make_arrays(df: pd.DataFrame, feature_cols: list[str], binary_phase: str = "
             1 = target phase, 0 = all other phases.  The label encoder will
             have classes ["Other", binary_phase] so class 1 is always the target.
     """
-    X = df[feature_cols].fillna(0).values.astype(np.float32)
+    # Do not impute NaNs — XGBoost handles missing values natively by learning
+    # the optimal split direction for each missing entry. Filling with 0 after
+    # z-score normalisation would set missing data to the user's mean, which
+    # introduces bias when a feature is missing because too little text was written.
+    X = df[feature_cols].values.astype(np.float32)
 
     if binary_phase:
         binary_labels = df["phase"].apply(lambda p: binary_phase if p == binary_phase else "Other")
@@ -336,74 +340,8 @@ def run_shap_analysis(model, X, feature_names, label_encoder, output_dir, timest
 # ═══════════════════════════════════════════════════════════════════════════════
 # OVR ENSEMBLE
 # ═══════════════════════════════════════════════════════════════════════════════
-def load_consistency_map(
-    reports_dir: Path,
-    threshold: float,
-    feature_names: list[str],
-    phases: list[str],
-    files_cfg: dict,
-    min_features: int = 3,
-) -> dict[str, list[int]]:
-    """Load phase_peak_summary CSV (script 10 output) and return
-    {phase → [col_indices_in_feature_names]} for features where
-    pct_consistent >= threshold in that phase.
 
-    feature_names are zscore column names like 'readability_zscore'.
-    CSV has base names like 'readability'. Mapping: strip '_zscore' suffix.
-
-    Falls back to all features for a phase if fewer than min_features pass.
-    """
-    phase_dist_dir = reports_dir / "phase_distributions"
-    summary_pattern = files_cfg["phase_peak_summary"] + "_*.csv"
-    candidates = sorted(phase_dist_dir.glob(summary_pattern))
-    if not candidates:
-        logging.warning("  No phase_peak_summary_*.csv found — consistency filter disabled.")
-        return {}
-
-    csv_path = candidates[-1]
-    logging.info(f"  Loading consistency map from: {csv_path.name}")
-    summary = pd.read_csv(csv_path)
-
-    # Build lookup: base_name → row
-    summary_map = {row["feature"]: row for _, row in summary.iterrows()}
-
-    # Strip _zscore suffix from feature_names to get base names
-    def base_name(fn: str) -> str:
-        return fn.replace("_zscore", "").replace("_mean", "")
-
-    consistency_map = {}
-    for phase in phases:
-        col = f"{phase}_pct_consistent"
-        if col not in summary.columns:
-            logging.warning(f"  {phase}: column '{col}' not in summary — skipping")
-            continue
-
-        indices = []
-        for idx, fn in enumerate(feature_names):
-            bn = base_name(fn)
-            if bn in summary_map:
-                pct = summary_map[bn].get(col, float("nan"))
-                if pd.notna(pct) and pct >= threshold:
-                    indices.append(idx)
-
-        if len(indices) < min_features:
-            logging.warning(
-                f"  {phase}: only {len(indices)} features >= {threshold:.0f}% "
-                f"(need {min_features}) — using all {len(feature_names)} features"
-            )
-            indices = list(range(len(feature_names)))
-
-        consistency_map[phase] = indices
-        feat_labels = [feature_names[i] for i in indices[:5]]
-        logging.info(
-            f"  {phase}: {len(indices)} consistent features >= {threshold:.0f}%  "
-            f"(top: {', '.join(feat_labels)}{'…' if len(indices) > 5 else ''})"
-        )
-
-    return consistency_map
-
-def train_ovr_ensemble(X, y, groups, feature_names, label_encoder, n_folds, output_dir, timestamp,
-                       consistency_map: dict | None = None):
+def train_ovr_ensemble(X, y, groups, feature_names, label_encoder, n_folds, output_dir, timestamp):
     """Train one binary XGBoost per phase (One-vs-Rest) with shared GroupKFold splits.
 
     One-vs-Rest means 4 separate binary classifiers: Menstrual vs rest,
@@ -437,14 +375,8 @@ def train_ovr_ensemble(X, y, groups, feature_names, label_encoder, n_folds, outp
         pos_n, neg_n = y_binary.sum(), (y_binary == 0).sum()
         scale_w = neg_n / max(pos_n, 1)
 
-        # Phase-specific feature subset (consistency filter)
-        if consistency_map and phase in consistency_map:
-            feat_idx = consistency_map[phase]
-            X_phase = X[:, feat_idx]
-            n_feats_used = len(feat_idx)
-        else:
-            X_phase = X
-            n_feats_used = X.shape[1]
+        X_phase = X
+        n_feats_used = X.shape[1]
 
         model = XGBClassifier(
             objective="binary:logistic",
@@ -507,6 +439,121 @@ def train_ovr_ensemble(X, y, groups, feature_names, label_encoder, n_folds, outp
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# PERMUTATION TEST
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def permute_labels_within_user(y: np.ndarray, groups: np.ndarray, rng) -> np.ndarray:
+    """Shuffle phase labels within each user independently.
+
+    Preserves the number of days per user and the GroupKFold structure.
+    Destroys the phase→language relationship while keeping per-user
+    feature distributions intact.  If AUC stays high after permutation
+    the model is not learning genuine phase signals.
+    """
+    y_perm = y.copy()
+    for user in np.unique(groups):
+        mask = groups == user
+        y_perm[mask] = rng.permutation(y[mask])
+    return y_perm
+
+
+def run_permutation_test(
+    X: np.ndarray,
+    y: np.ndarray,
+    groups: np.ndarray,
+    label_encoder,
+    n_folds: int,
+    n_permutations: int,
+    output_dir: Path,
+    timestamp: str,
+) -> None:
+    """Run a within-user permutation test.
+
+    For each of n_permutations iterations: shuffle phase labels within each
+    user, train the same XGBoost (OvR macro AUC via multiclass softprob),
+    collect AUC.  The empirical p-value is the fraction of permuted AUCs >=
+    the real AUC (lower = more confident the signal is real).
+    """
+    logging.info(f"\n{'='*60}")
+    logging.info(f"PERMUTATION TEST — {n_permutations} within-user shuffles")
+    logging.info(f"{'='*60}")
+
+    n_classes = len(label_encoder.classes_)
+    model_template = XGBClassifier(
+        objective="multi:softprob",
+        num_class=n_classes,
+        n_estimators=300,
+        max_depth=6,
+        learning_rate=0.05,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        eval_metric="mlogloss",
+        random_state=42,
+        n_jobs=-1,
+        verbosity=0,
+    )
+
+    # Real AUC (use actual labels)
+    _, y_proba_real = oof_predictions(model_template, X, y, groups, n_folds)
+    real_auc = roc_auc_score(y, y_proba_real, multi_class="ovr", average="macro")
+    logging.info(f"  Real macro AUC: {real_auc:.4f}")
+
+    rng = np.random.default_rng(42)
+    perm_aucs = []
+    for i in range(n_permutations):
+        y_perm = permute_labels_within_user(y, groups, rng)
+        _, y_proba_perm = oof_predictions(model_template, X, y_perm, groups, n_folds)
+        auc_perm = roc_auc_score(y_perm, y_proba_perm, multi_class="ovr", average="macro")
+        perm_aucs.append(auc_perm)
+        logging.info(f"  Permutation {i+1:>3}/{n_permutations}: AUC {auc_perm:.4f}")
+
+    perm_aucs = np.array(perm_aucs)
+    p_value = (perm_aucs >= real_auc).mean()
+    logging.info(f"\n  Permuted AUC: mean={perm_aucs.mean():.4f}  std={perm_aucs.std():.4f}")
+    logging.info(f"  Real AUC:     {real_auc:.4f}")
+    logging.info(f"  Empirical p-value (fraction perm >= real): {p_value:.4f}")
+    if p_value < 0.05:
+        logging.info("  → Signal is REAL (p < 0.05). Phase labels carry genuine linguistic information.")
+    else:
+        logging.info("  → Signal NOT significant (p >= 0.05). Possible circularity / noise.")
+
+    # Save text report
+    lines = [
+        f"Permutation test | GroupKFold ({n_folds} folds) | {n_permutations} permutations",
+        f"",
+        f"Real macro AUC:      {real_auc:.4f}",
+        f"Permuted mean AUC:   {perm_aucs.mean():.4f}",
+        f"Permuted std AUC:    {perm_aucs.std():.4f}",
+        f"Permuted AUCs:       {', '.join(f'{a:.4f}' for a in perm_aucs)}",
+        f"Empirical p-value:   {p_value:.4f}",
+    ]
+    rpt_path = output_dir / f"permutation_test_{timestamp}.txt"
+    rpt_path.write_text("\n".join(lines))
+    logging.info(f"  Report → {rpt_path.name}")
+
+    # Plot: permuted AUC distribution with real AUC marked
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.hist(perm_aucs, bins=max(5, n_permutations // 2), color="steelblue", alpha=0.7,
+            edgecolor="white", label="Permuted")
+    ax.axvline(real_auc, color="tomato", lw=2, linestyle="-", label=f"Real AUC ({real_auc:.3f})")
+    ax.axvline(perm_aucs.mean(), color="navy", lw=1.5, linestyle="--",
+               label=f"Perm mean ({perm_aucs.mean():.3f})")
+    ax.set_xlabel("Macro AUC (OvR)")
+    ax.set_ylabel("Count")
+    ax.set_title(
+        f"Permutation Test — Within-User Label Shuffle\n"
+        f"p={p_value:.3f}  ({n_permutations} permutations, GroupKFold {n_folds} folds)",
+        fontsize=11,
+    )
+    ax.legend()
+    plt.tight_layout()
+    plot_path = output_dir / f"permutation_test_{timestamp}.png"
+    fig.savefig(plot_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    logging.info(f"  Plot → {plot_path.name}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # HELPERS
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -566,12 +613,16 @@ def parse_args():
         help="Train one binary XGBoost per phase (One-vs-Rest) with shared GroupKFold "
              "splits, then report per-phase AUC and ensemble macro AUC.",
     )
+    p.add_argument("--no-anchors", action="store_true",
+                   help="Use no-anchors phase-labeled file (timeline_phase_labeled_no_anchors_*.csv). "
+                        "Run scripts/08b_label_phases.py --no-anchors first.")
     p.add_argument(
-        "--consistency-filter", type=float, default=0.0, metavar="THRESHOLD",
-        help="If > 0, filter features per phase in the OvR classifier to only those "
-             "where pct_consistent >= THRESHOLD (0-100) from script 10's summary CSV. "
-             "Requires reports/phase_distributions/phase_peak_summary_*.csv to exist.",
+        "--permute", action="store_true",
+        help="Run within-user permutation test to validate that phase labels carry "
+             "genuine linguistic signal (not circularity from FFT-detected periodicity).",
     )
+    p.add_argument("--n-permutations", type=int, default=10,
+                   help="Number of permutations for --permute (default 10; use 50+ for publication).")
     p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args()
 
@@ -588,16 +639,22 @@ def main():
     interim_dir = Path(cfg["paths"]["interim"])
     files_cfg = cfg["paths"]["files"]
 
-    output_dir = ROOT / "reports" / "ml"
+    output_dir = ROOT / "reports" / ("ml_no_anchors" if args.no_anchors else "ml")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # ── [1] Load phase-labeled timeline (step 08b output) ──────────────────────
-    logging.info("\n[1/5] Loading phase-labeled timeline (step 08b)…")
-    path = find_latest_file(interim_dir, files_cfg["phase_labeled"] + "_*.csv")
+    anchor_suffix = "_no_anchors" if args.no_anchors else ""
+    phase_labeled_pattern = files_cfg["phase_labeled"] + anchor_suffix + "_*.csv"
+    logging.info(f"\n[1/5] Loading phase-labeled timeline (step 08b)… [{phase_labeled_pattern}]")
+    path = find_latest_file(
+        interim_dir,
+        phase_labeled_pattern,
+        exclude=None if args.no_anchors else "_no_anchors",
+    )
     if path is None:
         raise FileNotFoundError(
-            "No timeline_phase_labeled_*.csv found in data/interim/. "
-            "Run scripts/08b_label_phases.py first."
+            f"No {phase_labeled_pattern} found in data/interim/. "
+            f"Run scripts/08b_label_phases.py{'  --no-anchors' if args.no_anchors else ''} first."
         )
     logging.info(f"  Loading: {path.name}")
     df = pd.read_csv(path, encoding="utf-8-sig", low_memory=False)
@@ -669,24 +726,14 @@ def main():
                 args.n_folds, output_dir, timestamp,
             )
 
-            if args.consistency_filter > 0:
-                logging.info(
-                    f"\n[5c] OvR ensemble — consistency filter "
-                    f"(pct_consistent >= {args.consistency_filter:.0f}%)…"
-                )
-                consistency_map = load_consistency_map(
-                    reports_dir=ROOT / "reports",
-                    threshold=args.consistency_filter,
-                    feature_names=zscore_cols,
-                    phases=list(label_encoder.classes_),
-                    files_cfg=files_cfg,
-                )
-                ts_filtered = timestamp + "_filtered"
-                train_ovr_ensemble(
-                    X, y, groups, zscore_cols, label_encoder,
-                    args.n_folds, output_dir, ts_filtered,
-                    consistency_map=consistency_map,
-                )
+    # ── [5c] Optional permutation test ─────────────────────────────────────────
+    if args.permute:
+        if args.binary_phase:
+            logging.warning("--permute with --binary-phase permutes the binary labels within user.")
+        run_permutation_test(
+            X, y, groups, label_encoder,
+            args.n_folds, args.n_permutations, output_dir, timestamp,
+        )
 
     logging.info(f"\nAll outputs → {output_dir}/")
     logging.info("Done.")
