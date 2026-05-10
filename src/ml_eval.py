@@ -58,6 +58,7 @@ def run_phase_statistical_gauntlet(
     feature_names: list[str],
     top_indices: list[int],
     empirical_tail_pct: int = 10,
+    groups: np.ndarray | None = None,
 ) -> pd.DataFrame:
     """Mann-Whitney U + Fisher tail tests (BH-FDR) for OvR top features.
 
@@ -87,6 +88,8 @@ def run_phase_statistical_gauntlet(
     p_high_raw, p_low_raw = [], []
     p_ch_raw, p_cl_raw = [], []
 
+    rank_biserial_rs = []
+    responder_fracs = []
     median_shifts, mean_shifts = [], []
     hi_stats, lo_stats = [], []
     hi_sev_med, hi_sev_mean = [], []
@@ -118,8 +121,32 @@ def run_phase_statistical_gauntlet(
         median_shifts.append(np.median(feat[phase_mask]) - np.median(feat[~phase_mask]))
         mean_shifts.append(np.mean(feat[phase_mask])   - np.mean(feat[~phase_mask]))
 
-        _, pg = stats.mannwhitneyu(feat[phase_mask], feat[~phase_mask], alternative="two-sided")
+        stat, pg = stats.mannwhitneyu(feat[phase_mask], feat[~phase_mask], alternative="two-sided")
+        n1n2 = n_phase * n_rest
+        rb_r = float(1 - (2 * stat) / n1n2) if n1n2 > 0 else float("nan")
         p_global_raw.append(pg)
+
+        rank_biserial_rs.append(rb_r)
+
+        if groups is not None:
+            global_direction = np.sign(median_shifts[-1])
+            groups_valid = groups[valid_mask]   # apply same NaN mask used for feat/phase_mask
+            n_respond = 0
+            n_eligible = 0
+            for uid in np.unique(groups_valid):
+                uid_mask = groups_valid == uid
+                uid_phase = uid_mask & phase_mask
+                uid_rest  = uid_mask & ~phase_mask
+                if uid_phase.sum() == 0 or uid_rest.sum() == 0:
+                    continue
+                n_eligible += 1
+                user_shift = np.mean(feat[uid_phase]) - np.mean(feat[uid_rest])
+                if global_direction == 0 or np.sign(user_shift) == global_direction:
+                    n_respond += 1
+            frac = n_respond / n_eligible if n_eligible > 0 else float("nan")
+            responder_fracs.append(frac)
+        else:
+            responder_fracs.append(float("nan"))
 
         # ── Empirical tails: data-driven 10th / 90th percentile ─────────────
         hi_mask = feat >= np.percentile(feat, 100 - empirical_tail_pct)
@@ -173,6 +200,8 @@ def run_phase_statistical_gauntlet(
         "global_p_fdr":                 pg_fdr,
         "global_median_shift":          median_shifts,
         "global_mean_shift":            mean_shifts,
+        "global_rank_biserial_r":       rank_biserial_rs,
+        "global_responder_frac":        responder_fracs,
         # empirical high tail
         "high_tail_p_fdr":              ph_fdr,
         "high_phase_pct":               [s[0] for s in hi_stats],

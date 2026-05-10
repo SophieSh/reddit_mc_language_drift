@@ -463,7 +463,7 @@ def train_ovr_ensemble(X, y, groups, feature_names, label_encoder, n_folds, outp
         logging.info(f"  {phase:<12}: AUC {auc:.3f}  (pos={pos_n}, neg={neg_n}, feats={n_feats_used})")
         ovr_probas[:, i] = y_proba_phase
 
-        gauntlet_df = run_phase_statistical_gauntlet(X_phase, y_binary, list(feature_names), top_indices, empirical_tail_pct)
+        gauntlet_df = run_phase_statistical_gauntlet(X_phase, y_binary, list(feature_names), top_indices, empirical_tail_pct, groups)
         gauntlet_df.insert(0, "phase", phase)
         _print_gauntlet_table(phase, gauntlet_df)
         gauntlet_results.append(gauntlet_df)
