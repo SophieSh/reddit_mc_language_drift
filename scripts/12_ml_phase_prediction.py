@@ -58,6 +58,7 @@ Confirmed null results (do not re-investigate):
 
 import argparse
 import logging
+import random
 import sys
 import warnings
 from datetime import datetime
@@ -76,23 +77,31 @@ from sklearn.metrics import (
 from sklearn.base import clone
 from sklearn.model_selection import StratifiedGroupKFold
 from sklearn.preprocessing import LabelEncoder
-from scipy import stats
-from statsmodels.stats.multitest import multipletests
 from xgboost import XGBClassifier
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from src.analysis import (
-    aggregate_to_phase_profiles,
-    normalize_features_per_user_zscore,
-)
+from src.analysis import normalize_features_per_user_zscore
 from src.config import load_config
+from src.constants import CLASSIC_Z_HIGH, CLASSIC_Z_LOW, PHASE_ORDER
 from src.io import find_latest_file, save_with_timestamp
+from src.ml_data import load_phase_labeled_dataset
+from src.ml_eval import log_oof_metrics, run_phase_statistical_gauntlet
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
-PHASE_ORDER = ["Menstrual", "Follicular", "Ovulation", "Luteal"]
+
+def _clean_feat_name(name: str) -> str:
+    """Strip z-score suffix and replace underscores with spaces for display.
+
+    Args:
+        name: Raw feature column name (e.g. "valence_dict_average_zscore").
+
+    Returns:
+        Human-readable label (e.g. "valence dict average").
+    """
+    return name.replace("_zscore", "").replace("_", " ")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -181,7 +190,7 @@ def compute_sample_weights(y: np.ndarray) -> np.ndarray:
     from sklearn.utils.class_weight import compute_sample_weight
     return compute_sample_weight("balanced", y)
 
-def oof_predictions(model, X, y, groups, n_folds: int) -> np.ndarray:
+def oof_predictions(model, X, y, groups, n_folds: int, seed: int = 42) -> np.ndarray:
     """Out-of-fold predictions with StratifiedGroupKFold on author.
 
     All user-days from the same user stay entirely in either train or test.
@@ -193,7 +202,7 @@ def oof_predictions(model, X, y, groups, n_folds: int) -> np.ndarray:
     the fit_params argument from cross_val_predict in favour of metadata routing,
     which XGBoost does not support.
     """
-    gkf = StratifiedGroupKFold(n_splits=n_folds, shuffle=True, random_state=42)
+    gkf = StratifiedGroupKFold(n_splits=n_folds, shuffle=True, random_state=seed)
     sample_weights = compute_sample_weights(y)
     y_pred = np.empty_like(y)
     n_classes = len(np.unique(y))
@@ -211,7 +220,7 @@ def oof_predictions(model, X, y, groups, n_folds: int) -> np.ndarray:
 # ═══════════════════════════════════════════════════════════════════════════════
 # 3. MODEL — XGBOOST ENSEMBLE
 # ═══════════════════════════════════════════════════════════════════════════════
-def train_and_evaluate_ensemble(X, y, groups, feature_names, label_encoder, n_folds, output_dir, timestamp):
+def train_and_evaluate_ensemble(X, y, groups, feature_names, label_encoder, n_folds, output_dir, timestamp, seed: int = 42):
     logging.info(f"\n{'='*60}")
     logging.info("MODEL — XGBoostClassifier")
     logging.info(f"{'='*60}")
@@ -228,15 +237,15 @@ def train_and_evaluate_ensemble(X, y, groups, feature_names, label_encoder, n_fo
         subsample=0.8,
         colsample_bytree=0.8,
         eval_metric="mlogloss",
-        random_state=42,
+        random_state=seed,
         n_jobs=-1,
         verbosity=0,
     )
-    y_pred, y_proba = oof_predictions(model, X, y, groups, n_folds)
+    y_pred, y_proba = oof_predictions(model, X, y, groups, n_folds, seed=seed)
 
     report = classification_report(y, y_pred, target_names=label_encoder.classes_, digits=3)
     logging.info(f"\nOOF Report:\n{report}")
-    _log_auc(y, y_proba, label_encoder)
+    log_oof_metrics(y, y_proba, label_encoder)
 
     rpt_path = output_dir / f"classification_report_ensemble_{timestamp}.txt"
     rpt_path.write_text(f"XGBoostClassifier | StratifiedGroupKFold OOF ({n_folds} folds)\n\n{report}")
@@ -267,12 +276,12 @@ def train_and_evaluate_ensemble(X, y, groups, feature_names, label_encoder, n_fo
 # ═══════════════════════════════════════════════════════════════════════════════
 # SHAP EXPLAINABILITY
 # ═══════════════════════════════════════════════════════════════════════════════
-def run_shap_analysis(model, X, y, feature_names, label_encoder, output_dir, timestamp, max_display=20):
+def run_shap_analysis(model, X, y, feature_names, label_encoder, output_dir, timestamp, max_display=20, seed: int = 42):
     logging.info("\n  Computing SHAP values (TreeExplainer)…")
 
     n_shap = min(len(X), 5_000)
     if n_shap < len(X):
-        idx = np.random.default_rng(42).choice(len(X), size=n_shap, replace=False)
+        idx = np.random.default_rng(seed).choice(len(X), size=n_shap, replace=False)
         X_shap = X[idx]
         y_shap = y[idx]
     else:
@@ -378,105 +387,10 @@ def run_shap_analysis(model, X, y, feature_names, label_encoder, output_dir, tim
 # OVR ENSEMBLE
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def run_phase_statistical_gauntlet(
-    X: np.ndarray,
-    y_binary: np.ndarray,
-    feature_names: list[str],
-    top_indices: list[int],
-) -> pd.DataFrame:
-    """Mann-Whitney U + Fisher tail tests (BH-FDR) for OvR top-15 features.
-
-    Returns one row per feature with FDR-corrected p-values and raw tail
-    effect sizes (phase % vs rest % in each tail, plus relative risk).
-    """
-    feat_names = []
-    p_global_raw, p_high_raw, p_low_raw = [], [], []
-    median_shifts = []
-    hi_stats, lo_stats = [], []
-    hi_severities, lo_severities = [], []
-
-    phase_mask_global = y_binary == 1
-
-    for idx in top_indices:
-        raw_feat = X[:, idx].astype(float)
-
-        # Isolate only valid (non-NaN) rows for this feature before any math.
-        # NaNs in X are intentional for XGBoost but must be removed for scipy tests:
-        # mannwhitneyu propagates NaN by default, and including NaN users in the
-        # denominator artificially shrinks tail percentages (NaN != threshold → False).
-        valid_mask = ~np.isnan(raw_feat)
-        feat = raw_feat[valid_mask]
-        phase_mask = phase_mask_global[valid_mask]
-
-        n_phase_users = phase_mask.sum()
-        n_rest_users  = (~phase_mask).sum()
-
-        if n_phase_users == 0 or n_rest_users == 0:
-            continue
-
-        median_shifts.append(
-            np.median(feat[phase_mask]) - np.median(feat[~phase_mask])
-        )
-
-        _, pg = stats.mannwhitneyu(feat[phase_mask], feat[~phase_mask], alternative="two-sided")
-        p_global_raw.append(pg)
-
-        high_threshold = np.percentile(feat, 90)
-        phase_users_in_high_tail = phase_mask & (feat >= high_threshold)
-        rest_users_in_high_tail  = (~phase_mask) & (feat >= high_threshold)
-        hi_phase_pct = phase_users_in_high_tail.sum() / n_phase_users * 100
-        hi_rest_pct  = rest_users_in_high_tail.sum()  / n_rest_users  * 100
-        hi_stats.append((hi_phase_pct, hi_rest_pct, hi_phase_pct / max(hi_rest_pct, 0.001)))
-        hi_severities.append(
-            np.median(feat[phase_users_in_high_tail]) if phase_users_in_high_tail.sum() > 0 else np.nan
-        )
-        ct_high = np.array([
-            [phase_users_in_high_tail.sum(), (phase_mask & ~(feat >= high_threshold)).sum()],
-            [rest_users_in_high_tail.sum(),  ((~phase_mask) & ~(feat >= high_threshold)).sum()],
-        ])
-        _, ph = stats.fisher_exact(ct_high, alternative="greater")
-        p_high_raw.append(ph)
-
-        low_threshold = np.percentile(feat, 10)
-        phase_users_in_low_tail = phase_mask & (feat <= low_threshold)
-        rest_users_in_low_tail  = (~phase_mask) & (feat <= low_threshold)
-        lo_phase_pct = phase_users_in_low_tail.sum() / n_phase_users * 100
-        lo_rest_pct  = rest_users_in_low_tail.sum()  / n_rest_users  * 100
-        lo_stats.append((lo_phase_pct, lo_rest_pct, lo_phase_pct / max(lo_rest_pct, 0.001)))
-        lo_severities.append(
-            np.median(feat[phase_users_in_low_tail]) if phase_users_in_low_tail.sum() > 0 else np.nan
-        )
-        ct_low = np.array([
-            [phase_users_in_low_tail.sum(), (phase_mask & ~(feat <= low_threshold)).sum()],
-            [rest_users_in_low_tail.sum(),  ((~phase_mask) & ~(feat <= low_threshold)).sum()],
-        ])
-        _, pl = stats.fisher_exact(ct_low, alternative="greater")
-        p_low_raw.append(pl)
-
-        feat_names.append(feature_names[idx])
-
-    _, pg_fdr, _, _ = multipletests(p_global_raw, method="fdr_bh")
-    _, ph_fdr, _, _ = multipletests(p_high_raw, method="fdr_bh")
-    _, pl_fdr, _, _ = multipletests(p_low_raw, method="fdr_bh")
-
-    return pd.DataFrame({
-        "feature":             feat_names,
-        "global_p_fdr":        pg_fdr,
-        "global_median_shift": median_shifts,
-        "high_tail_p_fdr":     ph_fdr,
-        "high_phase_pct":      [s[0] for s in hi_stats],
-        "high_rest_pct":       [s[1] for s in hi_stats],
-        "high_rr":             [s[2] for s in hi_stats],
-        "high_severity":       hi_severities,
-        "low_tail_p_fdr":      pl_fdr,
-        "low_phase_pct":       [s[0] for s in lo_stats],
-        "low_rest_pct":        [s[1] for s in lo_stats],
-        "low_rr":              [s[2] for s in lo_stats],
-        "low_severity":        lo_severities,
-    })
+# run_phase_statistical_gauntlet is imported from src.ml_eval
 
 
-def train_ovr_ensemble(X, y, groups, feature_names, label_encoder, n_folds, output_dir, timestamp):
+def train_ovr_ensemble(X, y, groups, feature_names, label_encoder, n_folds, output_dir, timestamp, empirical_tail_pct=10, seed: int = 42):
     """Train one binary XGBoost per phase (One-vs-Rest) with shared StratifiedGroupKFold splits.
 
     One-vs-Rest means 4 separate binary classifiers: Menstrual vs rest,
@@ -499,7 +413,7 @@ def train_ovr_ensemble(X, y, groups, feature_names, label_encoder, n_folds, outp
     n_phases = len(phases)
 
     # Precompute shared splits once — StratifiedGroupKFold preserves phase distribution per fold
-    gkf = StratifiedGroupKFold(n_splits=n_folds, shuffle=True, random_state=42)
+    gkf = StratifiedGroupKFold(n_splits=n_folds, shuffle=True, random_state=seed)
     fold_splits = list(gkf.split(X, y, groups))
 
     ovr_probas = np.zeros((len(y), n_phases))
@@ -523,27 +437,33 @@ def train_ovr_ensemble(X, y, groups, feature_names, label_encoder, n_folds, outp
             colsample_bytree=0.8,
             scale_pos_weight=scale_w,
             eval_metric="logloss",
-            random_state=42,
+            random_state=seed,
             n_jobs=-1,
             verbosity=0,
         )
 
+        # Accumulate OOF feature importances across folds to avoid selection bias.
+        # Using a full-data model for feature selection (then testing on the same
+        # data) is a double-dip: the model has seen all labels during selection.
+        # OOF importances are computed on held-out data and are therefore unbiased.
+        oof_importances = np.zeros(X_phase.shape[1])
         y_proba_phase = np.zeros(len(y_binary))
         for train_idx, test_idx in fold_splits:
             m = clone(model)
             m.fit(X_phase[train_idx], y_binary[train_idx])
             y_proba_phase[test_idx] = m.predict_proba(X_phase[test_idx])[:, 1]
+            oof_importances += m.feature_importances_
+
+        # Average OOF importances across folds, then select top 15
+        oof_importances /= len(fold_splits)
+        top_indices = np.argsort(oof_importances)[::-1][:15].tolist()
 
         auc = roc_auc_score(y_binary, y_proba_phase)
         phase_aucs[phase] = auc
         logging.info(f"  {phase:<12}: AUC {auc:.3f}  (pos={pos_n}, neg={neg_n}, feats={n_feats_used})")
         ovr_probas[:, i] = y_proba_phase
 
-        # Fit full-data model to extract stable feature importances, then run gauntlet
-        full_model = clone(model)
-        full_model.fit(X_phase, y_binary)
-        top_indices = np.argsort(full_model.feature_importances_)[::-1][:15].tolist()
-        gauntlet_df = run_phase_statistical_gauntlet(X_phase, y_binary, list(feature_names), top_indices)
+        gauntlet_df = run_phase_statistical_gauntlet(X_phase, y_binary, list(feature_names), top_indices, empirical_tail_pct)
         gauntlet_df.insert(0, "phase", phase)
         _print_gauntlet_table(phase, gauntlet_df)
         gauntlet_results.append(gauntlet_df)
@@ -621,6 +541,7 @@ def run_permutation_test(
     n_permutations: int,
     output_dir: Path,
     timestamp: str,
+    seed: int = 42,
 ) -> None:
     """Run a within-user permutation test.
 
@@ -643,17 +564,17 @@ def run_permutation_test(
         subsample=0.8,
         colsample_bytree=0.8,
         eval_metric="mlogloss",
-        random_state=42,
+        random_state=seed,
         n_jobs=-1,
         verbosity=0,
     )
 
     # Real AUC (use actual labels)
-    _, y_proba_real = oof_predictions(model_template, X, y, groups, n_folds)
+    _, y_proba_real = oof_predictions(model_template, X, y, groups, n_folds, seed=seed)
     real_auc = roc_auc_score(y, y_proba_real, multi_class="ovr", average="macro")
     logging.info(f"  Real macro AUC: {real_auc:.4f}")
 
-    rng = np.random.default_rng(42)
+    rng = np.random.default_rng(seed)
     perm_aucs = []
     for i in range(n_permutations):
         y_perm = permute_labels_within_user(y, groups, rng)
@@ -726,14 +647,20 @@ def _build_gauntlet_markdown(
         p = row["global_p_fdr"]
         if p >= 0.05:
             return "—"
-        shift = row["global_median_shift"]
-        arrow = "↑" if shift > 0 else "↓"
-        return f"{_fmt_p(p)} ({arrow} {abs(shift):.2f} SD)"
+        med  = row["global_median_shift"]
+        mean = row["global_mean_shift"]
+        arrow = "↑" if med > 0 else "↓"
+        return f"{_fmt_p(p)} {arrow} Med {abs(med):.2f} / Mean {abs(mean):.2f} SD"
 
-    def _fmt_extreme(p, phase_pct, rest_pct, rr, severity) -> str:
+    def _fmt_tail(p, phase_pct, rest_pct, rr, sev_med, sev_mean) -> str:
         if p >= 0.05:
             return "—"
-        return f"{_fmt_p(p)} \\| {phase_pct:.1f}% vs {rest_pct:.1f}% ({rr:.1f}x) [Severity: {severity:+.2f} SD]"
+        med_s  = f"{sev_med:+.2f}"  if sev_med  == sev_med  else "—"   # NaN check
+        mean_s = f"{sev_mean:+.2f}" if sev_mean == sev_mean else "—"
+        return (
+            f"{_fmt_p(p)} \\| {phase_pct:.1f}% vs {rest_pct:.1f}%"
+            f" ({rr:.1f}x) [Med: {med_s} / Mean: {mean_s} SD]"
+        )
 
     def _phenotype(row) -> str:
         g  = row["global_p_fdr"]    < 0.05
@@ -763,9 +690,11 @@ def _build_gauntlet_markdown(
         df_ph = gauntlet_all[gauntlet_all["phase"] == phase].copy()
 
         sig_mask = (
-            (df_ph["global_p_fdr"]    < 0.05) |
-            (df_ph["high_tail_p_fdr"] < 0.05) |
-            (df_ph["low_tail_p_fdr"]  < 0.05)
+            (df_ph["global_p_fdr"]           < 0.05) |
+            (df_ph["high_tail_p_fdr"]        < 0.05) |
+            (df_ph["low_tail_p_fdr"]         < 0.05) |
+            (df_ph["classic_high_tail_p_fdr"] < 0.05) |
+            (df_ph["classic_low_tail_p_fdr"]  < 0.05)
         )
         df_ph = df_ph[sig_mask].copy()
         if df_ph.empty:
@@ -778,18 +707,23 @@ def _build_gauntlet_markdown(
         lines += [
             f"## Phase: {phase} (AUC {auc_str})", "",
             "Top predictive features with at least one significant FDR-corrected p-value. "
-            "Sorted by Clinical Phenotype.", "",
-            "| Feature | Global Shift | Extreme High | Extreme Low | Clinical Phenotype |",
-            "|---|---|---|---|---|",
+            "Sorted by Clinical Phenotype. "
+            "Empirical tails use data-driven 10th/90th percentiles; "
+            f"Classic tails use fixed z ≥ {CLASSIC_Z_HIGH} / z ≤ {CLASSIC_Z_LOW} (theoretical 10% tails).", "",
+            "| Feature | Global Shift (Med/Mean) | Empirical High | Empirical Low"
+            " | Classic High | Classic Low | Clinical Phenotype |",
+            "|---|---|---|---|---|---|---|",
         ]
         for _, row in df_ph.iterrows():
-            feat = row["feature"].replace("_zscore", "").replace("_", " ")
+            feat = _clean_feat_name(row["feature"])
             lines.append(
-                f"| {feat} "
-                f"| {_fmt_global(row)} "
-                f"| {_fmt_extreme(row['high_tail_p_fdr'], row['high_phase_pct'], row['high_rest_pct'], row['high_rr'], row['high_severity'])} "
-                f"| {_fmt_extreme(row['low_tail_p_fdr'], row['low_phase_pct'], row['low_rest_pct'], row['low_rr'], row['low_severity'])} "
-                f"| {row['_phenotype']} |"
+                f"| {feat}"
+                f" | {_fmt_global(row)}"
+                f" | {_fmt_tail(row['high_tail_p_fdr'], row['high_phase_pct'], row['high_rest_pct'], row['high_rr'], row['high_severity_median'], row['high_severity_mean'])}"
+                f" | {_fmt_tail(row['low_tail_p_fdr'], row['low_phase_pct'], row['low_rest_pct'], row['low_rr'], row['low_severity_median'], row['low_severity_mean'])}"
+                f" | {_fmt_tail(row['classic_high_tail_p_fdr'], row['classic_high_phase_pct'], row['classic_high_rest_pct'], row['classic_high_rr'], row['classic_high_severity_median'], row['classic_high_severity_mean'])}"
+                f" | {_fmt_tail(row['classic_low_tail_p_fdr'], row['classic_low_phase_pct'], row['classic_low_rest_pct'], row['classic_low_rr'], row['classic_low_severity_median'], row['classic_low_severity_mean'])}"
+                f" | {row['_phenotype']} |"
             )
         lines.append("")
     return "\n".join(lines)
@@ -799,14 +733,19 @@ def _print_gauntlet_table(phase: str, df: pd.DataFrame) -> None:
     def _fmt(p: float) -> str:
         return f"{p:.4f}*" if p < 0.05 else f"{p:.4f} "
 
-    logging.info(f"\n  {'─'*68}")
+    logging.info(f"\n  {'─'*96}")
     logging.info(f"  Gauntlet: {phase}")
-    logging.info(f"  {'─'*68}")
-    logging.info(f"  {'Feature':<36} {'Global p(FDR)':>14} {'HighTail p(FDR)':>16} {'LowTail p(FDR)':>15}")
+    logging.info(f"  {'─'*96}")
+    logging.info(
+        f"  {'Feature':<36} {'Global p':>10} {'EmpHi p':>10} {'EmpLo p':>10}"
+        f" {'ClsHi p':>10} {'ClsLo p':>10} {'Med Δ':>8} {'Mean Δ':>8}"
+    )
     for _, row in df.iterrows():
         logging.info(
-            f"  {row['feature']:<36} {_fmt(row['global_p_fdr']):>14} "
-            f"{_fmt(row['high_tail_p_fdr']):>16} {_fmt(row['low_tail_p_fdr']):>15}"
+            f"  {row['feature']:<36} {_fmt(row['global_p_fdr']):>10}"
+            f" {_fmt(row['high_tail_p_fdr']):>10} {_fmt(row['low_tail_p_fdr']):>10}"
+            f" {_fmt(row['classic_high_tail_p_fdr']):>10} {_fmt(row['classic_low_tail_p_fdr']):>10}"
+            f" {row['global_median_shift']:>+8.3f} {row['global_mean_shift']:>+8.3f}"
         )
 
 
@@ -815,26 +754,7 @@ def _macro_f1(y_true, y_pred) -> float:
     return f1_score(y_true, y_pred, average="macro", zero_division=0)
 
 
-def _log_auc(y_true, y_proba, label_encoder) -> None:
-    """Log ROC-AUC. For binary: standard AUC. For multiclass: OvR macro AUC.
-    AUC = 0.5 is random regardless of class balance — unlike macro F1."""
-    n_classes = len(label_encoder.classes_)
-    if y_proba.sum() == 0:
-        logging.info("  AUC: N/A (model has no predict_proba)")
-        return
-    try:
-        if n_classes == 2:
-            auc = roc_auc_score(y_true, y_proba[:, 1])
-            logging.info(f"  AUC-ROC (binary): {auc:.3f}  [random=0.500]")
-        else:
-            auc_ovr = roc_auc_score(y_true, y_proba, multi_class="ovr", average="macro")
-            logging.info(f"  AUC-ROC OvR macro: {auc_ovr:.3f}  [random=0.500]")
-            for i, cls in enumerate(label_encoder.classes_):
-                y_bin = (y_true == i).astype(int)
-                cls_auc = roc_auc_score(y_bin, y_proba[:, i])
-                logging.info(f"    {cls:<12}: AUC {cls_auc:.3f}")
-    except Exception as e:
-        logging.warning(f"  AUC computation failed: {e}")
+# log_oof_metrics is imported from src.ml_eval
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -874,8 +794,11 @@ def parse_args():
         help="Run within-user permutation test to validate that phase labels carry "
              "genuine linguistic signal (not circularity from FFT-detected periodicity).",
     )
-    p.add_argument("--n-permutations", type=int, default=10,
-                   help="Number of permutations for --permute (default 10; use 50+ for publication).")
+    p.add_argument("--n-permutations", type=int, default=100,
+                   help="Number of permutations for --permute (default 100; use 500+ for publication).")
+    p.add_argument("--empirical-tail-pct", type=int, default=10,
+                   help="Percentile for empirical tail thresholds (default 10 → 10th/90th pct). "
+                        "Use 20 for 20th/80th pct.")
     p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args()
 
@@ -889,42 +812,56 @@ def main():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     cfg = load_config(args.config)
+    seed = cfg.get("seed", 42)
+    np.random.seed(seed)
+    random.seed(seed)
+
     interim_dir = Path(cfg["paths"]["interim"])
     files_cfg = cfg["paths"]["files"]
 
     output_dir = ROOT / "reports" / ("ml_no_anchors" if args.no_anchors else "ml")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── [1] Load phase-labeled timeline (step 08b output) ──────────────────────
-    anchor_suffix = "_no_anchors" if args.no_anchors else ""
-    phase_labeled_pattern = files_cfg["phase_labeled"] + anchor_suffix + "_*.csv"
-    logging.info(f"\n[1/5] Loading phase-labeled timeline (step 08b)… [{phase_labeled_pattern}]")
-    path = find_latest_file(
-        interim_dir,
-        phase_labeled_pattern,
-        exclude=None if args.no_anchors else "_no_anchors",
-    )
-    if path is None:
-        raise FileNotFoundError(
-            f"No {phase_labeled_pattern} found in data/interim/. "
-            f"Run scripts/08b_label_phases.py{'  --no-anchors' if args.no_anchors else ''} first."
-        )
-    logging.info(f"  Loading: {path.name}")
-    df = pd.read_csv(path, encoding="utf-8-sig", low_memory=False)
-    logging.info(f"  {len(df):,} user-days from {df['author'].nunique():,} users")
-    if "phase" not in df.columns:
-        raise ValueError("Missing 'phase' column. Re-run scripts/08b_label_phases.py.")
-
-    # ── [2] Compute per-user z-scores from _mean columns ───────────────────────
-    # Must happen before any aggregation so each user's mean/std is computed
-    # over their complete set of labeled days.
-    logging.info("\n[2/5] Computing per-user z-score features from _mean columns…")
-    df, zscore_cols = compute_zscore_features(df)
-
+    # ── [1+2] Load and z-score phase-labeled timeline ──────────────────────────
     # ── [3] Optionally aggregate to per-user phase profiles ────────────────────
     if args.aggregate_by_phase:
-        logging.info("\n[3/5] Aggregating to per-user phase profiles…")
-        df = aggregate_to_phase_profiles(df, zscore_cols)
+        # load_phase_labeled_dataset handles file location, z-scoring, phase
+        # filtering, and aggregation in a single call (same logic as script 27).
+        logging.info("\n[1/5] Loading + z-scoring + aggregating via load_phase_labeled_dataset…")
+        df, zscore_cols, _le_from_loader = load_phase_labeled_dataset(
+            cfg, no_anchors=args.no_anchors
+        )
+        logging.info("\n[3/5] Phase profiles already aggregated by load_phase_labeled_dataset.")
+    else:
+        # Day-level path: load raw file, z-score, keep one row per user-day.
+        anchor_suffix = "_no_anchors" if args.no_anchors else ""
+        phase_labeled_pattern = files_cfg["phase_labeled"] + anchor_suffix + "_*.csv"
+        logging.info(
+            f"\n[1/5] Loading phase-labeled timeline (step 08b)… [{phase_labeled_pattern}]"
+        )
+        path = find_latest_file(
+            interim_dir,
+            phase_labeled_pattern,
+            exclude=None if args.no_anchors else "_no_anchors",
+        )
+        if path is None:
+            raise FileNotFoundError(
+                f"No {phase_labeled_pattern} found in data/interim/. "
+                f"Run scripts/08b_label_phases.py"
+                f"{'  --no-anchors' if args.no_anchors else ''} first."
+            )
+        logging.info(f"  Loading: {path.name}")
+        df = pd.read_csv(path, encoding="utf-8-sig", low_memory=False)
+        logging.info(f"  {len(df):,} user-days from {df['author'].nunique():,} users")
+        if "phase" not in df.columns:
+            raise ValueError("Missing 'phase' column. Re-run scripts/08b_label_phases.py.")
+
+        # ── [2] Compute per-user z-scores from _mean columns ───────────────────
+        # Must happen before any aggregation so each user's mean/std is computed
+        # over their complete set of labeled days.
+        logging.info("\n[2/5] Computing per-user z-score features from _mean columns…")
+        df, zscore_cols = compute_zscore_features(df)
+        logging.info("\n[3/5] Day-level mode — no phase aggregation.")
 
     # ── [4] Save labelled dataset ───────────────────────────────────────────────
     logging.info("\n[4/5] Saving labelled user-day dataset…")
@@ -957,13 +894,13 @@ def main():
     logging.info("\n[5/5] XGBoost ensemble…")
     ensemble = train_and_evaluate_ensemble(
         X, y, groups, zscore_cols, label_encoder,
-        args.n_folds, output_dir, timestamp,
+        args.n_folds, output_dir, timestamp, seed=seed,
     )
 
     if not args.skip_shap:
         run_shap_analysis(
             ensemble, X, y, zscore_cols, label_encoder,
-            output_dir, timestamp, args.shap_max_display,
+            output_dir, timestamp, args.shap_max_display, seed=seed,
         )
     else:
         logging.info("  SHAP skipped.")
@@ -977,6 +914,7 @@ def main():
             train_ovr_ensemble(
                 X, y, groups, zscore_cols, label_encoder,
                 args.n_folds, output_dir, timestamp,
+                empirical_tail_pct=args.empirical_tail_pct, seed=seed,
             )
 
     # ── [5c] Optional permutation test ─────────────────────────────────────────
@@ -985,7 +923,7 @@ def main():
             logging.warning("--permute with --binary-phase permutes the binary labels within user.")
         run_permutation_test(
             X, y, groups, label_encoder,
-            args.n_folds, args.n_permutations, output_dir, timestamp,
+            args.n_folds, args.n_permutations, output_dir, timestamp, seed=seed,
         )
 
     logging.info(f"\nAll outputs → {output_dir}/")

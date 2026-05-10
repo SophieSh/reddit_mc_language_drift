@@ -1,6 +1,7 @@
 """Functions for FFT and Lomb-Scargle periodogram analysis."""
 from __future__ import annotations
 
+import logging
 import numpy as np
 import pandas as pd
 from scipy import signal
@@ -269,17 +270,17 @@ def normalize_features_per_user_zscore(
     """
     df = daily_agg_df.copy()
     
-    print(f"Applying per-user z-score normalization to {len(feature_mean_cols)} features...")
+    logging.debug(f"Applying per-user z-score normalization to {len(feature_mean_cols)} features...")
     
     for mean_col in feature_mean_cols:
         if mean_col not in df.columns:
-            print(f"  Warning: {mean_col} not found, skipping")
+            logging.debug(f"  Warning: {mean_col} not found, skipping")
             continue
         
         # Ensure column is numeric (convert if needed)
         original_dtype = df[mean_col].dtype
         if not pd.api.types.is_numeric_dtype(df[mean_col]):
-            print(f"  Warning: {mean_col} is not numeric (dtype: {original_dtype}), converting...")
+            logging.debug(f"  Warning: {mean_col} is not numeric (dtype: {original_dtype}), converting...")
             df[mean_col] = pd.to_numeric(df[mean_col], errors='coerce')
         
         zscore_col = mean_col.replace("_mean", "_zscore")
@@ -290,9 +291,9 @@ def normalize_features_per_user_zscore(
         
         # Debug: Check dtypes before conversion
         if user_stds.dtype == 'object' or str(user_stds.dtype).startswith('<U'):
-            print(f"  ERROR: {mean_col} -> user_stds has dtype {user_stds.dtype}, converting...")
-            print(f"    Sample values: {user_stds.head(5).tolist()}")
-            print(f"    mean_col dtype: {df[mean_col].dtype}")
+            logging.debug(f"  ERROR: {mean_col} -> user_stds has dtype {user_stds.dtype}, converting...")
+            logging.debug(f"    Sample values: {user_stds.head(5).tolist()}")
+            logging.debug(f"    mean_col dtype: {df[mean_col].dtype}")
         
         # Ensure both are numeric Series (defensive check) - convert BEFORE arithmetic
         # Convert to numpy arrays with explicit float64 dtype to avoid pandas dtype issues
@@ -325,7 +326,7 @@ def normalize_features_per_user_zscore(
         df.loc[user_stds_series < epsilon_val, zscore_col] = np.nan
         
         valid_count = df[zscore_col].notna().sum()
-        print(f"  ✓ {mean_col} → {zscore_col}: {valid_count} valid values")
+        logging.debug(f"  {mean_col} -> {zscore_col}: {valid_count} valid values")
     
     return df
 
