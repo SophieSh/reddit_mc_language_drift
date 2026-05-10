@@ -126,15 +126,19 @@ def main(
     results = []
     total_combinations = len(mean_cols) * daily_agg['author'].nunique()
     processed = 0
-    
+
     # Determine which methods to run based on method parameter
     if method == "fft_interpolation_integer":
         methods_to_run = ["fft_interpolation"]  # Will use integer periods version if needed
     else:
         methods_to_run = [method]
-    
+
+    # Pre-compute groupby once — groupby is O(n) per call; recomputing it inside the
+    # feature loop multiplies the cost by n_features unnecessarily.
+    user_groups = list(daily_agg.groupby('author'))
+
     for feature_col, feature_name in zip(mean_cols, feature_base_names):
-        for user, user_df in daily_agg.groupby('author'):
+        for user, user_df in user_groups:
             processed += 1
             
             if processed % 100000 == 0:

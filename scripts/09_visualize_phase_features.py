@@ -16,22 +16,9 @@ from pathlib import Path
 import pandas as pd
 
 from src.config import load_config
+from src.constants import ORIGINAL_FEATURES
 from src.io import find_latest_file, save_with_timestamp
 from src.visualization import aggregate_features_by_phase, plot_phase_analysis
-
-
-ORIGINAL_FEATURES = [
-    'negative_sentiment',
-    'positive_sentiment',
-    'num_words',
-    'avg_word_length',
-    'num_sentences',
-    'unique_word_fraction',
-    'readability',
-    'spelling_errors_frac',
-    'syntactic_complexity_subordination_index',
-    'cohesion_analysis_lexical_overlap',
-]
 
 
 def main(config_path: str = "configs/base.yaml", original_features_only: bool = False, no_anchors: bool = False, consensus_file: str | None = None) -> None:

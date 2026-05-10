@@ -103,7 +103,7 @@ def main(
     raw_dir = Path(cfg["paths"]["raw"])
     interim_dir = Path(cfg["paths"]["interim"])
     processed_dir = Path(cfg["paths"]["processed"])
-    min_chars = cfg.get("pipeline", {}).get("min_chars", 150)
+    min_chars = cfg.get("reddit", {}).get("min_chars", 100)
     
     interim_dir.mkdir(parents=True, exist_ok=True)
     processed_dir.mkdir(parents=True, exist_ok=True)

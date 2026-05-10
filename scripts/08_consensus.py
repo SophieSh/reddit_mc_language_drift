@@ -19,6 +19,7 @@ from pathlib import Path
 import pandas as pd
 
 from src.config import load_config
+from src.constants import ORIGINAL_FEATURES
 from src.io import find_latest_file, save_with_timestamp
 from src.analysis import assign_consensus_period_by_majority
 from src.timeline import load_users_database
@@ -90,21 +91,6 @@ def main(
     
     periodicity_df = pd.read_csv(periodicity_path, encoding='utf-8-sig', low_memory=False)
     print(f"   Loaded {len(periodicity_df):,} periodicity results from {periodicity_path.name}")
-    
-    # Original features used in biologically-aligned results
-    ORIGINAL_FEATURES = [
-        'negative_sentiment',           # Negative Sentiment
-        'positive_sentiment',           # Positive Sentiment
-        'num_words',                    # Word Count
-        'avg_word_length',              # Avg. Word Length
-        'num_sentences',                # Avg. Words/Sentence
-        'unique_word_fraction',         # Unique Word Fraction
-        'readability',                  # Flesch-Kincaid
-        'spelling_errors_frac',         # Spelling Error Fraction
-        'syntactic_complexity_subordination_index',  # Syntactic Complexity
-        'cohesion_analysis_lexical_overlap',  # Cohesion
-        # Note: MATTR not found in current features, using unique_word_fraction as lexical diversity measure
-    ]
     
     # Filter to original features if requested
     if use_original_features_only:

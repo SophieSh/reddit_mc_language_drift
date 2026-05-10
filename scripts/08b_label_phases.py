@@ -34,12 +34,11 @@ sys.path.insert(0, str(ROOT))
 
 from src.analysis import assign_phases_to_timeline, compute_user_phase_definitions
 from src.config import load_config
+from src.constants import PHASE_ORDER
 from src.io import find_latest_file, save_with_timestamp
 
-PHASE_ORDER = ["Menstrual", "Follicular", "Ovulation", "Luteal"]
 
-
-def main(config_path: str = "configs/base.yaml") -> int:
+def main(config_path: str = "configs/base.yaml", no_anchors: bool = False) -> int:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s  %(levelname)-8s  %(message)s",
@@ -49,16 +48,19 @@ def main(config_path: str = "configs/base.yaml") -> int:
     cfg = load_config(config_path)
     interim_dir = Path(cfg["paths"]["interim"])
     files_cfg = cfg["paths"]["files"]
+    anchor_suffix = "_no_anchors" if no_anchors else ""
 
     # ── [1] Load consensus periods ──────────────────────────────────────────────
+    cp_prefix = files_cfg["consensus_periods"]
+    consensus_pattern = f"{cp_prefix}_*{anchor_suffix}_*.csv" if no_anchors else f"{cp_prefix}_*.csv"
     consensus_path = find_latest_file(
         interim_dir,
-        files_cfg["consensus_periods"] + "_*.csv",
-        exclude="_no_anchors",
+        consensus_pattern,
+        exclude=None if no_anchors else "_no_anchors",
     )
     if consensus_path is None:
         logging.error(
-            "No consensus_periods_*.csv found in data/interim/. "
+            f"No {consensus_pattern} found in data/interim/. "
             "Run scripts/08_consensus.py first."
         )
         return 1
@@ -76,13 +78,11 @@ def main(config_path: str = "configs/base.yaml") -> int:
     logging.info(f"  {len(user_period_map):,} users with detected cycle lengths")
 
     # ── [2] Load daily-aggregated timeline ──────────────────────────────────────
-    tl_path = find_latest_file(
-        interim_dir,
-        files_cfg["daily_aggregated_with_anchors"] + "_*.csv",
-    )
+    tl_key = "daily_aggregated_no_anchors" if no_anchors else "daily_aggregated_with_anchors"
+    tl_path = find_latest_file(interim_dir, files_cfg[tl_key] + "_*.csv")
     if tl_path is None:
         logging.error(
-            "No timeline_daily_aggregated_with_anchors_*.csv found in data/interim/. "
+            f"No {files_cfg[tl_key]}_*.csv found in data/interim/. "
             "Run scripts/06_aggregate_and_normalize.py first."
         )
         return 1
@@ -118,7 +118,7 @@ def main(config_path: str = "configs/base.yaml") -> int:
     logging.info(f"  Phase distribution:\n{df['phase'].value_counts().to_string()}")
 
     # ── Save ────────────────────────────────────────────────────────────────────
-    out_path = save_with_timestamp(df, interim_dir, files_cfg["phase_labeled"])
+    out_path = save_with_timestamp(df, interim_dir, files_cfg["phase_labeled"] + anchor_suffix)
     logging.info(f"  Saved → {out_path.name}")
     logging.info("Done.")
     return 0
@@ -127,5 +127,7 @@ def main(config_path: str = "configs/base.yaml") -> int:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/base.yaml")
+    parser.add_argument("--no-anchors", action="store_true",
+                        help="Use no-anchors timeline and consensus files.")
     args = parser.parse_args()
-    raise SystemExit(main(args.config))
+    raise SystemExit(main(args.config, no_anchors=args.no_anchors))
