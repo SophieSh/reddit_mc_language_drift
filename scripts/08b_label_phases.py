@@ -38,7 +38,7 @@ from src.constants import PHASE_ORDER
 from src.io import find_latest_file, save_with_timestamp
 
 
-def main(config_path: str = "configs/base.yaml", no_anchors: bool = False) -> int:
+def main(config_path: str = "configs/base.yaml", no_anchors: bool = False, consensus_file: str | None = None) -> int:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s  %(levelname)-8s  %(message)s",
@@ -51,19 +51,25 @@ def main(config_path: str = "configs/base.yaml", no_anchors: bool = False) -> in
     anchor_suffix = "_no_anchors" if no_anchors else ""
 
     # ── [1] Load consensus periods ──────────────────────────────────────────────
-    cp_prefix = files_cfg["consensus_periods"]
-    consensus_pattern = f"{cp_prefix}_*{anchor_suffix}_*.csv" if no_anchors else f"{cp_prefix}_*.csv"
-    consensus_path = find_latest_file(
-        interim_dir,
-        consensus_pattern,
-        exclude=None if no_anchors else "_no_anchors",
-    )
-    if consensus_path is None:
-        logging.error(
-            f"No {consensus_pattern} found in data/interim/. "
-            "Run scripts/08_consensus.py first."
+    if consensus_file is not None:
+        consensus_path = Path(consensus_file)
+        if not consensus_path.exists():
+            logging.error(f"Consensus file not found: {consensus_file}")
+            return 1
+    else:
+        cp_prefix = files_cfg["consensus_periods"]
+        consensus_pattern = f"{cp_prefix}_*{anchor_suffix}_*.csv" if no_anchors else f"{cp_prefix}_*.csv"
+        consensus_path = find_latest_file(
+            interim_dir,
+            consensus_pattern,
+            exclude=None if no_anchors else "_no_anchors",
         )
-        return 1
+        if consensus_path is None:
+            logging.error(
+                f"No {consensus_pattern} found in data/interim/. "
+                "Run scripts/08_consensus.py first."
+            )
+            return 1
 
     logging.info(f"[1/3] Loading consensus periods: {consensus_path.name}")
     consensus_df = pd.read_csv(consensus_path, encoding="utf-8-sig")
@@ -129,5 +135,7 @@ if __name__ == "__main__":
     parser.add_argument("--config", default="configs/base.yaml")
     parser.add_argument("--no-anchors", action="store_true",
                         help="Use no-anchors timeline and consensus files.")
+    parser.add_argument("--consensus-file", default=None,
+                        help="Path to a specific consensus CSV (overrides auto-discovery).")
     args = parser.parse_args()
-    raise SystemExit(main(args.config, no_anchors=args.no_anchors))
+    raise SystemExit(main(args.config, no_anchors=args.no_anchors, consensus_file=args.consensus_file))
