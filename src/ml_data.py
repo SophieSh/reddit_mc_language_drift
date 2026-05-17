@@ -21,6 +21,7 @@ from src.io import find_latest_file
 def load_phase_labeled_dataset(
     cfg: dict,
     no_anchors: bool = False,
+    phase_file: str | None = None,
 ) -> tuple[pd.DataFrame, list[str], LabelEncoder]:
     """Load the step-08b phase-labeled timeline and return ML-ready data structures.
 
@@ -57,19 +58,26 @@ def load_phase_labeled_dataset(
     interim_dir = Path(cfg["paths"]["interim"])
     files_cfg   = cfg["paths"]["files"]
 
-    anchor_suffix = "_no_anchors" if no_anchors else ""
-    pattern = files_cfg["phase_labeled"] + anchor_suffix + "_*.csv"
-    path = find_latest_file(
-        interim_dir,
-        pattern,
-        exclude=None if no_anchors else "_no_anchors",
-    )
-    if path is None:
-        raise FileNotFoundError(
-            f"No {pattern} found in {interim_dir}. "
-            f"Run scripts/08b_label_phases.py"
-            f"{'  --no-anchors' if no_anchors else ''} first."
+    if phase_file is not None:
+        path = Path(phase_file)
+        if not path.exists():
+            path = interim_dir / phase_file
+        if not path.exists():
+            raise FileNotFoundError(f"Phase-labeled file not found: {phase_file}")
+    else:
+        anchor_suffix = "_no_anchors" if no_anchors else ""
+        pattern = files_cfg["phase_labeled"] + anchor_suffix + "_*.csv"
+        path = find_latest_file(
+            interim_dir,
+            pattern,
+            exclude=None if no_anchors else "_no_anchors",
         )
+        if path is None:
+            raise FileNotFoundError(
+                f"No {pattern} found in {interim_dir}. "
+                f"Run scripts/08b_label_phases.py"
+                f"{'  --no-anchors' if no_anchors else ''} first."
+            )
 
     df = pd.read_csv(path, encoding="utf-8-sig", low_memory=False)
     logging.info(f"Loaded: {path.name}  ({len(df):,} rows, {df['author'].nunique():,} users)")

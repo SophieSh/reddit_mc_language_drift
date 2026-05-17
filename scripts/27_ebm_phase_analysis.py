@@ -137,22 +137,30 @@ def run_group_kfold_cv(
       style, baseline vocabulary, and cycle trajectory.  They are NOT independent
       samples — GroupKFold keeps all rows for a given author in the same fold.
       Stratified additionally preserves the phase-class distribution per fold,
-      which matters because Follicular has more days than Ovulation.
+      which matters because Follicular has more data for more users than Ovulation.
+      
+      Classes (y): These are the 4 phases (Menstrual, Follicular, Ovulation, and Luteal). 
+      These are the labels the model is trying to predict.
+      Groups: These are the Authors (the users).
+      There are many unique groups (one for each unique user in your CSV).
 
     Returns:
         y_pred  : (n_samples,) integer hard predictions (OOF)
         y_proba : (n_samples, n_classes) probability matrix (OOF)
     """
     gkf = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+    #encoding = [Menstrual, Follicular, Ovulation, and Luteal] for model usage
     n_classes = len(label_encoder.classes_)
+    # number of users x 4 (up to 4 averaged values of the phase profile for each user)
     y_pred  = np.empty_like(y)
+    # matrix of probabilities for each class for each sample
     y_proba = np.zeros((len(y), n_classes), dtype=np.float64)
 
     for fold, (train_idx, test_idx) in enumerate(gkf.split(X, y, groups), start=1):
         logging.info(f"  Fold {fold}/{n_splits} — "
                      f"train={len(train_idx):,} test={len(test_idx):,}")
 
-        # EBM is fitted fresh on each fold (no warm start needed).
+        # EBM is fitted fresh on each fold (clean, no memory)
         # n_jobs=-1 parallelises the boosting rounds across features.
         ebm_fold = _make_ebm(seed)
         ebm_fold.fit(X[train_idx], y[train_idx])
@@ -402,6 +410,11 @@ def parse_args():
         help="Load the no-anchors phase-labeled file instead of the default (with-anchors).",
     )
     p.add_argument(
+        "--phase-file", default=None,
+        help="Path or filename (in interim dir) of a specific phase-labeled CSV to use "
+             "(e.g. timeline_phase_labeled_fixed29_20260517T131445.csv).",
+    )
+    p.add_argument(
         "--n-folds", type=int, default=5,
         help="Number of StratifiedGroupKFold splits.",
     )
@@ -441,7 +454,7 @@ def main():
 
     # ── [1] Load data ─────────────────────────────────────────────────────────
     logging.info("\n[1/4] Loading data…")
-    df, zscore_cols, le = load_phase_labeled_dataset(cfg, no_anchors=args.no_anchors)
+    df, zscore_cols, le = load_phase_labeled_dataset(cfg, no_anchors=args.no_anchors, phase_file=args.phase_file)
 
     # Build numpy arrays — these are the X / y / users the model trains on.
     # le is already fitted on PHASE_ORDER by load_phase_labeled_dataset.
