@@ -89,9 +89,9 @@ def main(
     print(f"  Users: {daily_agg['author'].nunique():,}")
     print(f"  Days per user: {len(daily_agg) / daily_agg['author'].nunique():.1f} (average)")
 
-    print(f"Appplying z-score normalization to features...")
-
-    daily_agg[feature_cols] = (
+    print(f"Applying z-score normalization to features...")
+    zscore_cols = [c.replace('_mean', '_zscore') for c in feature_cols]
+    daily_agg[zscore_cols] = (
         daily_agg.groupby('author')[feature_cols]
         .transform(lambda x: (x - x.mean()) / x.std())
     )
@@ -144,7 +144,8 @@ def main(
         print(f"  Days per user: {len(daily_agg_no) / daily_agg_no['author'].nunique():.1f} (average)")
 
         print(f"Applying z-score normalization to features (no anchors)...")
-        daily_agg_no[feature_cols_no] = (
+        zscore_cols_no = [c.replace('_mean', '_zscore') for c in feature_cols_no]
+        daily_agg_no[zscore_cols_no] = (
             daily_agg_no.groupby('author')[feature_cols_no]
             .transform(lambda x: (x - x.mean()) / x.std())
         )
