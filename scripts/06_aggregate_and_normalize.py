@@ -32,7 +32,6 @@ def main(
     use_checkpoint: bool = True,
     force_recompute: bool = False,
 ):
-    """Aggregate posts by day (normalization happens later in analysis)."""
     cfg = load_config(config_path)
     
     interim_dir = Path(cfg["paths"]["interim"])
@@ -42,7 +41,6 @@ def main(
     print("=" * 60)
     print("Step 6: Aggregate by Day")
     print("=" * 60)
-    print("  Note: Normalization will be done in analysis step (inside analyze_user_timeline)")
     print()
     
     files_cfg = cfg["paths"]["files"]
@@ -77,7 +75,7 @@ def main(
     if len(feature_cols) == 0:
         raise ValueError("No feature columns found in timeline")
     
-    # Step 3: Aggregate raw features by day (normalization happens later in analysis)
+    # Step 3: Aggregate raw features by day
     print("\n[Step 6.3] Aggregating posts by day...")
     daily_agg = aggregate_all_features_by_day(
         timeline_df=timeline_df,
@@ -90,7 +88,14 @@ def main(
     print(f"\n Final: {len(daily_agg):,} (user, day) combinations")
     print(f"  Users: {daily_agg['author'].nunique():,}")
     print(f"  Days per user: {len(daily_agg) / daily_agg['author'].nunique():.1f} (average)")
-    
+
+    print(f"Appplying z-score normalization to features...")
+
+    daily_agg[feature_cols] = (
+        daily_agg.groupby('author')[feature_cols]
+        .transform(lambda x: (x - x.mean()) / x.std())
+    )
+
     # Step 4: Save checkpoint (with anchors)
     print("\n[Step 6.4] Saving checkpoint (with anchors)...")
     output_file = save_with_timestamp(
@@ -137,7 +142,13 @@ def main(
         print(f"\n Final (no anchors): {len(daily_agg_no):,} (user, day) combinations")
         print(f"  Users: {daily_agg_no['author'].nunique():,}")
         print(f"  Days per user: {len(daily_agg_no) / daily_agg_no['author'].nunique():.1f} (average)")
-        
+
+        print(f"Applying z-score normalization to features (no anchors)...")
+        daily_agg_no[feature_cols_no] = (
+            daily_agg_no.groupby('author')[feature_cols_no]
+            .transform(lambda x: (x - x.mean()) / x.std())
+        )
+
         # Save no-anchors aggregated timeline
         print("\n[Step 6.5.3] Saving no-anchors checkpoint...")
         output_file_no = save_with_timestamp(
