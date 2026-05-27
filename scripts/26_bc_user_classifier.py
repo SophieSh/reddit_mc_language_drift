@@ -89,6 +89,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.config import load_config
+from src.constants import PHASE_ORDER
 from src.io import find_latest_file
 
 try:
@@ -101,7 +102,6 @@ except ImportError:
 warnings.filterwarnings("ignore")
 
 CYCLE_LENGTH = 28.0
-PHASE_ORDER = ["Menstrual", "Follicular", "Ovulation", "Luteal"]
 PHASE_BOUNDS = {
     "Menstrual":  (0,  5),
     "Follicular": (5,  13),

@@ -177,132 +177,159 @@ def run_group_kfold_cv(
 # INTERPRETATION EXTRACTION
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _extract_density(data: dict, n_bins: int) -> np.ndarray:
+    """Return a normalized density array of length n_bins, aligned with score bins by x value.
+
+    EBM stores the training-data density histogram at a coarser resolution than the score
+    bins (e.g. 20 density bins vs 254 score bins).  Direct length-matching therefore fails.
+    Instead we map each score bin to its corresponding density bin by midpoint x value, then
+    re-normalize so the returned array sums to 1.
+    Falls back to uniform weights if any required field is missing or malformed.
+    """
+    density_raw = data.get("density")
+    if not isinstance(density_raw, dict):
+        return np.ones(n_bins) / n_bins
+
+    dens_counts = np.asarray(density_raw.get("scores", []), dtype=float)
+    dens_edges  = np.asarray(density_raw.get("names",  []), dtype=float)
+
+    if len(dens_counts) == 0 or len(dens_edges) < 2:
+        return np.ones(n_bins) / n_bins
+
+    total = dens_counts.sum()
+    if total == 0:
+        return np.ones(n_bins) / n_bins
+
+    dens_frac = dens_counts / total
+
+    # Fast path: density and score bins already match.
+    if len(dens_counts) == n_bins:
+        return dens_frac
+
+    # General path: map score bin midpoints → density bins via shared x-axis edges.
+    score_edges = np.asarray(data.get("names", []), dtype=float)
+    if len(score_edges) < n_bins + 1:
+        return np.ones(n_bins) / n_bins
+
+    score_midpoints = (score_edges[:n_bins] + score_edges[1 : n_bins + 1]) / 2
+    # searchsorted against density right-edges finds the bin each midpoint falls in.
+    bin_indices = np.searchsorted(dens_edges[1:], score_midpoints, side="left")
+    bin_indices = np.clip(bin_indices, 0, len(dens_frac) - 1)
+
+    density_per_score_bin = dens_frac[bin_indices]
+    s = density_per_score_bin.sum()
+    return density_per_score_bin / s if s > 0 else np.ones(n_bins) / n_bins
+
+
 def extract_global_importance(
     ebm: ExplainableBoostingClassifier,
     feature_names: list[str],
     label_encoder: LabelEncoder,
 ) -> pd.DataFrame:
-    """Extract the global feature importance table from a fitted EBM.
-
-    For a multiclass EBM, ebm.explain_global() returns one importance score per
-    feature *per class*.  The score is the mean absolute log-odds contribution
-    of that feature across all training samples for that class.
-
-    Higher score → the feature's shape function makes larger swings for that
-    class, i.e. the feature is more *discriminative* for that class.
-
-    Returns a DataFrame with columns:
-        feature, Follicular, Luteal, Menstrual, Ovulation, mean_importance
-    """
     global_exp = ebm.explain_global()
-
-    # global_exp.data(i) returns a dict for feature i with keys:
-    #   "names"      : list of bin-edge labels (strings)
-    #   "scores"     : per-class log-odds array — shape (n_bins, n_classes)
-    #                  or (n_bins,) for binary
-    #   "type"       : "univariate"
-    #
-    # The *importance* score shown in the dashboard is simply the weighted mean
-    # of |scores| across bins (weighted by bin density).  We replicate that here
-    # so we can sort and export it.
-
+    phase_names = list(label_encoder.classes_)
     rows = []
-    n_classes = len(label_encoder.classes_)
 
-    # We recompute importance from raw scores rather than using ebm.term_importances_
-    # because we need per-class (per-phase) breakdowns, not just global importance.
     for feat_idx, feat_name in enumerate(feature_names):
         data = global_exp.data(feat_idx)
-        scores = np.asarray(data["scores"])  # (n_bins, n_classes) for multiclass
+        scores = np.asarray(data["scores"])
 
+        # 1. Correct 2D Reshaping (Ensures bins are rows, phases are columns)
         if scores.ndim == 1:
-            # Binary or single-class edge case — wrap to 2D
             scores = scores[:, np.newaxis]
 
-        # Mean absolute log-odds per class = overall discriminative power
-        # The last bin is usually an "out-of-range" catch-all; include it.
-        per_class_importance = np.abs(scores).mean(axis=0)  # shape: (n_classes,)
+        # 2. Normalized Density (Ensures weights sum to 1 for fair comparison)
+        # data["density"] is a dict in current interpret versions — unwrap to raw counts first.
+        density_raw = data.get("density", np.ones(scores.shape[0]))
+        if isinstance(density_raw, dict):
+            density_raw = density_raw.get("scores", np.ones(scores.shape[0]))
+        density = np.asarray(density_raw, dtype=float)
+        if len(density) != scores.shape[0]:
+            density = np.ones(scores.shape[0])
+        density = density / density.sum()  # Now density is a fraction (0.0 to 1.0)
+
+        # 3. Weighted Importance (Global average impact per user)
+        # Multiply scores by the normalized density
+        weighted_imp = np.sum(np.abs(scores) * density[:, np.newaxis], axis=0)
 
         row = {"feature": feat_name}
-        for cls_idx, cls_name in enumerate(label_encoder.classes_):
-            row[cls_name] = float(per_class_importance[cls_idx])
-        row["mean_importance"] = float(np.mean(list(row[c] for c in label_encoder.classes_)))
+        for i, phase in enumerate(phase_names):
+            row[f"{phase}_weighted_imp"] = float(weighted_imp[i])
+
+        # 4. Summary Sorting Column
+        row["global_weighted_avg"] = float(np.mean(weighted_imp))
+
         rows.append(row)
 
-    df_imp = pd.DataFrame(rows).sort_values("mean_importance", ascending=False)
-    return df_imp
+    # Sort by the normalized global importance
+    return pd.DataFrame(rows).sort_values("global_weighted_avg", ascending=False)
+
+def _parse_bin_midpoints(bin_labels: list) -> np.ndarray:
+    """Convert EBM bin-edge strings to numeric midpoints.
+
+    EBM label formats: "a to b" → midpoint, "> a" or "<= a" → boundary value.
+    Unparseable labels become NaN.
+    """
+    x_vals = []
+    for label in bin_labels:
+        label = str(label)
+        try:
+            if " to " in label:
+                lo, hi = label.split(" to ")
+                x_vals.append((float(lo) + float(hi)) / 2)
+            elif label.startswith(">"):
+                x_vals.append(float(label[1:].strip()))
+            elif label.startswith("<="):
+                x_vals.append(float(label[2:].strip()))
+            else:
+                x_vals.append(float(label))
+        except ValueError:
+            x_vals.append(np.nan)
+    return np.array(x_vals, dtype=np.float64)
+
 
 def extract_shape_function(
     ebm: ExplainableBoostingClassifier,
     feature_name: str,
     feature_names: list[str],
     label_encoder: LabelEncoder,
-) -> dict[str, tuple[np.ndarray, np.ndarray]]:
-    """Extract the bin edges and log-odds scores for one feature.
+) -> dict[str, dict]:
+    """Extract the shape function for one feature across all phases.
 
-    This is the core of EBM interpretability.  For each class, you get:
-        x  = bin midpoints (feature value, in z-score units relative to user mean)
-        y  = log-odds contribution at that value
-
-    A positive y at x=1.5 for "Menstrual" means: a user who scores 1.5 SD above
-    their personal mean on this feature has that log-odds added to their Menstrual
-    score, pushing them toward being classified as Menstrual.
-
-    Returns:
-        {class_name: (x_midpoints, log_odds_scores)}
-
-    Note: ebm.explain_global() returns a custom InterpretML object, not numpy arrays.
-    We extract bin edges and scores manually so callers get standard arrays for
-    saving, plotting, or further analysis.
+    Returns per-phase dicts with:
+        x            : bin midpoints (z-score relative to user mean)
+        y            : log-odds contribution per bin
+        density      : normalized fraction of users per bin
+        weighted_sum : density-weighted mean |log-odds| (overall signal strength)
     """
     if feature_name not in feature_names:
-        raise ValueError(
-            f"'{feature_name}' not found. Available: {feature_names[:5]} …"
-        )
-    feat_idx = feature_names.index(feature_name)
-    global_exp = ebm.explain_global()
-    data = global_exp.data(feat_idx)
+        raise ValueError(f"'{feature_name}' not found. Available: {feature_names[:5]} …")
 
-    # "names" are bin-edge strings like "-1.23 to 0.45".
-    # We parse the left edge of each bin to get a numeric x-axis.
-    bin_labels = data["names"]
-    scores     = np.asarray(data["scores"])  # (n_bins, n_classes)
+    data = ebm.explain_global().data(feature_names.index(feature_name))
 
+    scores = np.asarray(data["scores"])
     if scores.ndim == 1:
         scores = scores[:, np.newaxis]
 
-    # Parse left edge of each bin label as a float x value.
-    # Bin labels produced by EBM look like "-1.23 to 0.45" or "> 2.1".
-    x_vals = []
-    for label in bin_labels:
-        label = str(label)
-        try:
-            # "a to b" format — take midpoint of the bin
-            if " to " in label:
-                parts = label.split(" to ")
-                x_vals.append((float(parts[0]) + float(parts[1])) / 2)
-            elif label.startswith(">"):
-                x_vals.append(float(label.replace(">", "").strip()))
-            elif label.startswith("<="):
-                x_vals.append(float(label.replace("<=", "").strip()))
-            else:
-                x_vals.append(float(label))
-        except ValueError:
-            x_vals.append(np.nan)
+    x = _parse_bin_midpoints(data["names"])
 
-    x_arr = np.array(x_vals, dtype=np.float64)
+    # EBM sometimes emits one extra bin label — trim to the shorter length.
+    n = min(len(x), scores.shape[0])
+    x, scores = x[:n], scores[:n]
 
-    # EBM sometimes returns one more bin label than score rows (the final
-    # "catch-all" bin has a label but no separate score entry).  Trim to the
-    # shorter length so x and y always align.
-    n = min(len(x_arr), scores.shape[0])
-    x_arr = x_arr[:n]
-    scores = scores[:n]
+    density = _extract_density(data, n)
 
     result = {}
-    for cls_idx, cls_name in enumerate(label_encoder.classes_):
-        if cls_idx < scores.shape[1]:
-            result[cls_name] = (x_arr, scores[:, cls_idx])
+    for cls_idx, phase in enumerate(label_encoder.classes_):
+        if cls_idx >= scores.shape[1]:
+            continue
+        y = scores[:, cls_idx]
+        result[phase] = {
+            "x":           x,
+            "y":           y,
+            "density":     density,
+            "weighted_sum": float(np.sum(np.abs(y) * density)),
+        }
     return result
 
 
@@ -310,31 +337,22 @@ def extract_shape_function(
 # PLOTTING
 # ═══════════════════════════════════════════════════════════════════════════════
 def plot_shape_function(
-    shape_data: dict[str, tuple[np.ndarray, np.ndarray]],
+    shape_data: dict[str, dict],
     feature_name: str,
     output_path: Path,
 ) -> None:
     """Plot the EBM shape function (log-odds vs feature value) for all 4 phases.
 
-    The x-axis is the z-score of the feature relative to the user's personal mean.
-      x = 0   → user is at their own mean (no deviation)
-      x = 1.5 → user is 1.5 SD above their mean for this feature
-      x = -1  → user is 1 SD below their mean
-
-    The y-axis is the log-odds contribution.
-      y > 0 → pushes prediction toward this phase
-      y < 0 → pushes prediction away from this phase
-      y = 0 → feature is uninformative for this phase at this value
+    Each subplot title shows the density-weighted mean |log-odds|.
     """
     fig, axes = plt.subplots(2, 2, figsize=(14, 9), sharex=False, sharey=False)
     axes = axes.flatten()
-
     clean_name = _clean_feat_name(feature_name)
 
-    for ax, (phase, (x, y)) in zip(axes, shape_data.items()):
+    for ax, (phase, d) in zip(axes, shape_data.items()):
         color = PHASE_COLORS.get(phase, "gray")
+        x, y = d["x"], d["y"]
 
-        # Remove NaN x entries before plotting
         valid = ~np.isnan(x)
         x_v, y_v = x[valid], y[valid]
 
@@ -343,15 +361,10 @@ def plot_shape_function(
         ax.axhline(0, color="black", linewidth=0.8, linestyle="--")
         ax.axvline(0, color="gray",  linewidth=0.6, linestyle=":")
 
-        # Mark the most extreme positive/negative bin
-        if len(y_v) > 0:
-            peak_idx = np.argmax(np.abs(y_v))
-            ax.scatter(
-                x_v[peak_idx], y_v[peak_idx],
-                color=color, s=60, zorder=5, edgecolors="black", linewidths=0.8,
-            )
-
-        ax.set_title(f"{phase}", fontsize=12, fontweight="bold", color=color)
+        ax.set_title(
+            f"{phase}  |  weighted={d['weighted_sum']:.3f}",
+            fontsize=8, fontweight="bold", color=color,
+        )
         ax.set_xlabel("Feature value (z-score vs user mean)", fontsize=9)
         ax.set_ylabel("Log-odds contribution", fontsize=9)
         ax.grid(axis="y", alpha=0.3)
@@ -374,7 +387,8 @@ def plot_global_importance_heatmap(
 ) -> None:
     """Heatmap of mean-absolute log-odds importance: features × phases."""
     top = df_imp.head(top_n)
-    phase_cols = list(label_encoder.classes_)
+    phase_names = list(label_encoder.classes_)
+    phase_cols = [f"{p}_weighted_imp" for p in phase_names]
 
     matrix = top[phase_cols].values  # (top_n, n_classes)
     feature_labels = [_clean_feat_name(f) for f in top["feature"]]
@@ -382,8 +396,8 @@ def plot_global_importance_heatmap(
     fig, ax = plt.subplots(figsize=(9, top_n * 0.38 + 2))
     im = ax.imshow(matrix, aspect="auto", cmap="YlOrRd")
 
-    ax.set_xticks(range(len(phase_cols)))
-    ax.set_xticklabels(phase_cols, fontsize=11, fontweight="bold")
+    ax.set_xticks(range(len(phase_names)))
+    ax.set_xticklabels(phase_names, fontsize=11, fontweight="bold")
     ax.set_yticks(range(len(feature_labels)))
     ax.set_yticklabels(feature_labels, fontsize=8)
     ax.set_title(
@@ -503,8 +517,8 @@ def main():
     df_imp.to_csv(imp_path, index=False)
     logging.info(f"  Global importance → {imp_path.name}")
     logging.info(
-        f"\n  Top 10 features by mean importance:\n"
-        + df_imp[["feature", "mean_importance"] + list(le.classes_)]
+        f"\n  Top 10 features by weighted importance:\n"
+        + df_imp[["feature", "global_weighted_avg"]]
           .head(10)
           .to_string(index=False)
     )

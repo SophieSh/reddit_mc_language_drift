@@ -139,6 +139,10 @@ def build_cube(
             x = grp[feat].values.astype(float)
             # MATLAB: x_detrended = detrend(x - mean(x))
             x_det = linear_detrend(x - x.mean())
+            # Z-score: divide by std (ddof=1); skip if std == 0 to avoid NaN
+            std_ = x_det.std(ddof=1)
+            if std_ > 0:
+                x_det = x_det / std_
             cube[vi, user_idx[user], :] = _nufft_mag(t, x_det, w_grid).astype(np.float32)
 
     return cube, users

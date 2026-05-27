@@ -78,13 +78,13 @@ from src.analysis import (
     normalize_features_per_user_zscore,
 )
 from src.config import load_config
+from src.constants import PHASE_ORDER
 from src.io import find_latest_file, find_periodicity_results
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
 TREE_LEAF    = _tree.TREE_LEAF
-PHASE_ORDER  = ["Menstrual", "Follicular", "Ovulation", "Luteal"]
-PHASE_INT    = {p: i for i, p in enumerate(PHASE_ORDER)}   # for numeric encoding
+PHASE_INT    = {p: i for i, p in enumerate(PHASE_ORDER)}
 CYCLE_LENGTH = 28.0
 
 # Fixed phase bounds for BC users (identical proportions to adaptive logic
@@ -95,12 +95,13 @@ BC_PHASE_BOUNDS = {
     "Ovulation":  (13, 16),
     "Luteal":     (16, 28),
 }
+#overdefinition, should be included from another file where it is defined
 
 POP_KEYWORDS = [
     "pop", "norethindrone", "norgestrel", "desogestrel", "slynd", "opill",
     "cerazette", "cerelle", "nora-be", "camila", "errin", "jencycla", "lyza",
 ]
-
+#what is this, now clear naming 
 PHASE_COLORS = {
     "Follicular": "#4C9BE8",
     "Luteal":     "#E8884C",
@@ -108,7 +109,7 @@ PHASE_COLORS = {
     "Ovulation":  "#4CE89B",
 }
 
-
+# we should standartilize naming and write it in base.yml, no hardcoded names in text. then it would be easy to extrcat the file we need 
 # ═══════════════════════════════════════════════════════════════════════════════
 # DATA LOADING
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -161,7 +162,7 @@ def _load_bc_users() -> tuple[set[str], dict[str, float]]:
 
     return stable_set, started_map
 
-
+#don't we have bc phases function already?
 def _assign_bc_phases(df: pd.DataFrame) -> pd.DataFrame:
     """Assign phases to BC users using a fixed 28-day cycle."""
     df = df.copy()
