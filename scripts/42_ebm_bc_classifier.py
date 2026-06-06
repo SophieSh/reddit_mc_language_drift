@@ -301,15 +301,6 @@ def main():
         if df_bc.empty:
             raise ValueError(f"No BC users remain after filtering to pill_type='{args.pill_type}'.")
 
-    # Remove ALL authors in the BC file from the regular file regardless of pill-type filter,
-    # so no LLM-verified BC user can appear in the non-BC group.
-    all_bc_authors = set(pd.read_csv(args.bc_users_file, encoding="utf-8-sig",
-                                     usecols=["author"], low_memory=False)["author"].unique())
-    overlap = set(df_reg["author"].unique()) & all_bc_authors
-    if overlap:
-        logging.info(f"  Removing {len(overlap):,} LLM-verified BC users from regular file.")
-        df_reg = df_reg[~df_reg["author"].isin(all_bc_authors)]
-
     if args.window_days is not None:
         w = args.window_days
         before_reg = df_reg["author"].nunique()
