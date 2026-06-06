@@ -41,8 +41,10 @@ paths:
     posts_no_anchors: posts_all_users_preprocessed_no_anchors
     timeline_with_anchors: timeline_with_offsets_with_anchors
     timeline_no_anchors: timeline_with_offsets_no_anchors
-    daily_aggregated_with_anchors: timeline_daily_aggregated_with_anchors
-    daily_aggregated_no_anchors: timeline_daily_aggregated_no_anchors
+    daily_aggregated_with_anchors_raw: timeline_daily_aggregated_with_anchors_raw
+    daily_aggregated_with_anchors_zscore: timeline_daily_aggregated_with_anchors_zscore
+    daily_aggregated_no_anchors_raw: timeline_daily_aggregated_no_anchors_raw
+    daily_aggregated_no_anchors_zscore: timeline_daily_aggregated_no_anchors_zscore
     periodicity_results: periodicity_results
     consensus_periods: consensus_periods
     phase_labeled: timeline_phase_labeled
