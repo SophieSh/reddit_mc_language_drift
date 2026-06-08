@@ -197,7 +197,7 @@ def plot_shape_grid(
         f"Above 0 → {target_class}  |  Below 0 → {base_class}  |  x=0 → user at personal mean",
         fontsize=11, fontweight="bold",
     )
-    plt.tight_layout()
+    plt.tight_layout(rect=[0, 0, 1, 0.94])
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     logging.info(f"  Shape grid → {output_path.name}")
