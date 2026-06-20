@@ -53,6 +53,63 @@ def _filter_eligible(
     return pd.DataFrame(rows)
 
 
+def _filter_chain(
+    daily_agg: pd.DataFrame,
+    anchor_window: int,
+    max_gap: int,
+    min_span_days: int,
+    min_post_days: int,
+) -> pd.DataFrame:
+    """Connected-chain eligibility: users whose posting chain crosses the anchor.
+
+    For each user, considers only days within [-anchor_window, +anchor_window].
+    Starting from the day closest to 0, extends left and right as long as
+    consecutive posting days are ≤ max_gap apart. The resulting chain must:
+      - cross the anchor (left < 0 AND right > 0)
+      - span at least min_span_days
+      - contain at least min_post_days distinct posting days
+    """
+    within = daily_agg[daily_agg["offset_from_cd1"].between(-anchor_window, anchor_window)]
+    rows = []
+    for user, grp in within.groupby("author"):
+        days = sorted(grp["offset_from_cd1"].unique())
+        if not days:
+            continue
+
+        # Find starting point: day closest to 0 (prefer <=0)
+        before = [d for d in days if d <= 0]
+        after  = [d for d in days if d >= 0]
+        start  = before[-1] if before else after[0]
+        si     = days.index(start)
+
+        # Extend right from start
+        right = start
+        for i in range(si + 1, len(days)):
+            if days[i] - days[i - 1] <= max_gap:
+                right = days[i]
+            else:
+                break
+
+        # Extend left from start
+        left = start
+        for i in range(si - 1, -1, -1):
+            if days[i + 1] - days[i] <= max_gap:
+                left = days[i]
+            else:
+                break
+
+        if not (left < 0 and right > 0):
+            continue
+
+        span   = right - left
+        n_days = sum(1 for d in days if left <= d <= right)
+
+        if span >= min_span_days and n_days >= min_post_days:
+            rows.append({"user": user, "n_post_days": n_days, "span_days": span})
+
+    return pd.DataFrame(rows)
+
+
 def _run_variant(
     label: str,
     timeline_file: Path,
@@ -62,11 +119,14 @@ def _run_variant(
     interim_dir: Path,
     out_stem: str,
     skip_phase_filter: bool = False,
+    max_gap: int | None = None,
+    anchor_window: int = 28,
 ) -> int:
     print(f"\n[{label}] Loading: {timeline_file.name}")
     daily_agg = pd.read_csv(timeline_file, encoding="utf-8-sig", low_memory=False)
 
-    required = {"author", "offset_from_cd1"} if skip_phase_filter else {"author", "offset_from_cd1", "phase"}
+    required = {"author", "offset_from_cd1"} if (skip_phase_filter or max_gap is not None) \
+               else {"author", "offset_from_cd1", "phase"}
     missing = required - set(daily_agg.columns)
     if missing:
         raise ValueError(f"Input file '{timeline_file.name}' is missing required columns: {sorted(missing)}")
@@ -74,8 +134,11 @@ def _run_variant(
     total_users = daily_agg["author"].nunique()
     print(f"  {len(daily_agg):,} (user, day) rows, {total_users:,} users")
 
-    eligible_df = _filter_eligible(daily_agg, min_post_days, min_span_days, min_days_per_phase,
-                                   skip_phase_filter=skip_phase_filter)
+    if max_gap is not None:
+        eligible_df = _filter_chain(daily_agg, anchor_window, max_gap, min_span_days, min_post_days)
+    else:
+        eligible_df = _filter_eligible(daily_agg, min_post_days, min_span_days, min_days_per_phase,
+                                       skip_phase_filter=skip_phase_filter)
     eligible_users = set(eligible_df["user"])
     print(f"  Eligible: {len(eligible_users):,} / {total_users:,} users "
           f"({100 * len(eligible_users) / max(total_users, 1):.1f}%)")
@@ -102,6 +165,8 @@ def main(
     skip_phase_filter: bool = False,
     timeline_file: str | None = None,
     out_tag: str | None = None,
+    max_gap: int | None = None,
+    anchor_window: int = 28,
 ) -> int:
     cfg = load_config(config_path)
     interim_dir = Path(cfg["paths"]["interim"])
@@ -112,14 +177,22 @@ def main(
     print("=" * 60)
     print(f"  Min post days  : {min_post_days}")
     print(f"  Min span       : {min_span_days} days")
-    if skip_phase_filter:
+    if max_gap is not None:
+        print(f"  Mode           : connected chain (max_gap={max_gap}, anchor_window=±{anchor_window})")
+    elif skip_phase_filter:
         print(f"  Min days/phase : (skipped)")
     else:
         print(f"  Min days/phase : {min_days_per_phase}")
 
     exit_code = 0
-    phase_tag = "nophase" if skip_phase_filter else f"minphase{min_days_per_phase}"
     tag_suffix = f"_{out_tag}" if out_tag else ""
+
+    if max_gap is not None:
+        phase_tag = f"gap{max_gap}"
+        out_stem_base = f"eligible_users_two_cycles_minposts{min_post_days}_span{min_span_days}_{phase_tag}{tag_suffix}"
+    else:
+        phase_tag = "nophase" if skip_phase_filter else f"minphase{min_days_per_phase}"
+        out_stem_base = f"eligible_users_timeline_minposts{min_post_days}_span{min_span_days}_{phase_tag}{tag_suffix}"
 
     # ── Direct file mode: skip auto-discovery entirely ────────────────────────
     if timeline_file:
@@ -129,7 +202,6 @@ def main(
         if not tl_path.exists():
             print(f"  Timeline file not found: {timeline_file}")
             return 1
-        stem = f"eligible_users_timeline_minposts{min_post_days}_span{min_span_days}_{phase_tag}{tag_suffix}"
         return _run_variant(
             label=tl_path.stem,
             timeline_file=tl_path,
@@ -137,8 +209,10 @@ def main(
             min_span_days=min_span_days,
             min_days_per_phase=min_days_per_phase,
             interim_dir=interim_dir,
-            out_stem=stem,
+            out_stem=out_stem_base,
             skip_phase_filter=skip_phase_filter,
+            max_gap=max_gap,
+            anchor_window=anchor_window,
         )
 
     # ── Auto-discovery mode ───────────────────────────────────────────────────
@@ -159,8 +233,10 @@ def main(
                 min_span_days=min_span_days,
                 min_days_per_phase=min_days_per_phase,
                 interim_dir=interim_dir,
-                out_stem=f"eligible_users_timeline_minposts{min_post_days}_span{min_span_days}_{phase_tag}{tag_suffix}",
+                out_stem=out_stem_base,
                 skip_phase_filter=skip_phase_filter,
+                max_gap=max_gap,
+                anchor_window=anchor_window,
             )
             exit_code = exit_code or rc
 
@@ -178,8 +254,10 @@ def main(
                 min_span_days=min_span_days,
                 min_days_per_phase=min_days_per_phase,
                 interim_dir=interim_dir,
-                out_stem=f"eligible_users_timeline_minposts{min_post_days}_span{min_span_days}_{phase_tag}{tag_suffix}_no_anchors",
+                out_stem=out_stem_base + "_no_anchors",
                 skip_phase_filter=skip_phase_filter,
+                max_gap=max_gap,
+                anchor_window=anchor_window,
             )
             exit_code = exit_code or rc
 
@@ -205,6 +283,13 @@ if __name__ == "__main__":
                         help="Use a specific phase-labeled CSV instead of auto-discovery.")
     parser.add_argument("--out-tag", default=None,
                         help="Label appended to output filename (e.g. 'bc' → …_bc_*.csv).")
+    parser.add_argument("--max-gap", type=int, default=None,
+                        help="Enable connected-chain mode: max allowed gap (days) between "
+                             "consecutive posting days. Chain must cross the anchor (day 0). "
+                             "When set, --min-days-per-phase and --skip-phase-filter are ignored.")
+    parser.add_argument("--anchor-window", type=int, default=28,
+                        help="Window (±days) used for connected-chain eligibility check (default: 28). "
+                             "Only applies when --max-gap is set.")
 
     args = parser.parse_args()
     exit(main(
@@ -217,4 +302,6 @@ if __name__ == "__main__":
         skip_phase_filter=args.skip_phase_filter,
         timeline_file=args.timeline_file,
         out_tag=args.out_tag,
+        max_gap=args.max_gap,
+        anchor_window=args.anchor_window,
     ))
