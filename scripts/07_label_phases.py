@@ -39,7 +39,7 @@ from src.constants import PHASE_ORDER
 from src.io import find_latest_file, save_with_timestamp
 
 
-def main(config_path: str = "configs/base.yaml", no_anchors: bool = False, consensus_file: str | None = None, fixed_period: int | None = None, timeline_file: str | None = None) -> int:
+def main(config_path: str = "configs/base.yaml", no_anchors: bool = False, consensus_file: str | None = None, fixed_period: int | None = None, timeline_file: str | None = None, tag: str | None = None) -> int:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s  %(levelname)-8s  %(message)s",
@@ -98,21 +98,32 @@ def main(config_path: str = "configs/base.yaml", no_anchors: bool = False, conse
             logging.error(f"Timeline file not found: {timeline_file}")
             return 1
     elif fixed_period is not None:
-        # Auto-discover the eligible-users timeline from step 07a.
+        # Prefer eligible-users timeline (step 08a output) if it exists; otherwise
+        # fall back to the step-06 z-scored aggregated timeline.
         anchor_tag = "_no_anchors" if no_anchors else ""
         eligible_pattern = f"eligible_users_timeline_minposts*{anchor_tag}_*.csv"
         tl_path = find_latest_file(interim_dir, eligible_pattern,
                                    exclude=None if no_anchors else "_no_anchors")
-        if tl_path is None:
-            logging.error(
-                f"No eligible_users_timeline_*{anchor_tag}_*.csv found in data/interim/. "
-                "Run scripts/07a_select_eligible_users.py first, or pass --timeline-file."
+        if tl_path is not None:
+            logging.info(f"  Using eligible-users timeline (step 08a).")
+        else:
+            zscore_key = "daily_aggregated_no_anchors_zscore" if no_anchors else "daily_aggregated_with_anchors_zscore"
+            tl_path = find_latest_file(
+                interim_dir,
+                files_cfg[zscore_key] + "_*.csv",
+                exclude=None if no_anchors else "_no_anchors",
             )
-            return 1
-        logging.info(f"  Using eligible-users timeline from step 07a.")
+            if tl_path is None:
+                logging.error(
+                    f"No step-06 zscore timeline found in data/interim/. "
+                    "Run scripts/06_aggregate_and_normalize.py first, or pass --timeline-file."
+                )
+                return 1
+            logging.info(f"  No eligible-users timeline found; falling back to step-06 zscore output.")
     else:
-        tl_key = "daily_aggregated_no_anchors" if no_anchors else "daily_aggregated_with_anchors"
-        tl_path = find_latest_file(interim_dir, files_cfg[tl_key] + "_*.csv")
+        tl_key = "daily_aggregated_no_anchors_zscore" if no_anchors else "daily_aggregated_with_anchors_zscore"
+        tl_path = find_latest_file(interim_dir, files_cfg[tl_key] + "_*.csv",
+                                   exclude=None if no_anchors else "_no_anchors")
         if tl_path is None:
             logging.error(
                 f"No {files_cfg[tl_key]}_*.csv found in data/interim/. "
@@ -122,7 +133,17 @@ def main(config_path: str = "configs/base.yaml", no_anchors: bool = False, conse
 
     logging.info(f"[2/3] Loading daily-aggregated timeline: {tl_path.name}")
     df = pd.read_csv(tl_path, encoding="utf-8-sig", low_memory=False)
-    logging.info(f"  {len(df):,} user-days from {df['author'].nunique():,} users")
+
+    required = {"author", "offset_from_cd1"}
+    missing = required - set(df.columns)
+    if missing:
+        logging.error(f"Input file is missing required columns: {sorted(missing)}")
+        return 1
+    feature_cols = [c for c in df.columns if c not in ("author", "offset_from_cd1")]
+    if not feature_cols:
+        logging.error("Input file has no feature columns beyond 'author' and 'offset_from_cd1'.")
+        return 1
+    logging.info(f"  {len(df):,} user-days from {df['author'].nunique():,} users  ({len(feature_cols)} feature columns)")
 
     df["author"] = df["author"].astype(str)
 
@@ -139,15 +160,36 @@ def main(config_path: str = "configs/base.yaml", no_anchors: bool = False, conse
         )
 
     # ── [3] Assign phases ───────────────────────────────────────────────────────
-    logging.info("[3/3] Assigning adaptive phase labels…")
-    upm_filtered = {u: p for u, p in user_period_map.items() if u in set(df["author"])}
-    user_phase_df = compute_user_phase_definitions(upm_filtered)
-    df = assign_phases_to_timeline(
-        timeline_df=df,
-        user_phase_df=user_phase_df,
-        user_col="author",
-        time_col="offset_from_cd1",
-    )
+    logging.info("[3/3] Assigning phase labels…")
+
+    if fixed_period is not None:
+        # Vectorized path: same boundaries for every user — no per-row Python loop needed.
+        phase_def = compute_user_phase_definitions({" ": float(fixed_period)})
+        phase_def = phase_def[phase_def["user"] == " "]
+        boundaries = {
+            row["phase"]: (int(row["start_day"]), int(row["end_day"]))
+            for _, row in phase_def.iterrows()
+        }
+        day_mod = df["offset_from_cd1"].apply(
+            lambda x: int(x) % fixed_period if pd.notna(x) else None
+        )
+        def _phase(d):
+            if d is None:
+                return None
+            for phase, (s, e) in boundaries.items():
+                if s <= d <= e:
+                    return phase
+            return None
+        df["phase"] = day_mod.map(_phase)
+    else:
+        upm_filtered = {u: p for u, p in user_period_map.items() if u in set(df["author"])}
+        user_phase_df = compute_user_phase_definitions(upm_filtered)
+        df = assign_phases_to_timeline(
+            timeline_df=df,
+            user_phase_df=user_phase_df,
+            user_col="author",
+            time_col="offset_from_cd1",
+        )
 
     before = len(df)
     df = df[df["phase"].notna() & df["phase"].isin(PHASE_ORDER)].copy()
@@ -157,7 +199,8 @@ def main(config_path: str = "configs/base.yaml", no_anchors: bool = False, conse
     logging.info(f"  Phase distribution:\n{df['phase'].value_counts().to_string()}")
 
     # ── Save ────────────────────────────────────────────────────────────────────
-    out_path = save_with_timestamp(df, interim_dir, files_cfg["phase_labeled"] + period_suffix + anchor_suffix)
+    tag_suffix = f"_{tag}" if tag else ""
+    out_path = save_with_timestamp(df, interim_dir, files_cfg["phase_labeled"] + period_suffix + tag_suffix + anchor_suffix)
     logging.info(f"  Saved → {out_path.name}")
     logging.info("Done.")
     return 0
@@ -177,6 +220,8 @@ if __name__ == "__main__":
     parser.add_argument("--timeline-file", default=None,
                         help="Path or filename (in interim dir) of a specific timeline to use. "
                              "Overrides auto-discovery for both normal and --fixed-period runs.")
+    parser.add_argument("--tag", default=None,
+                        help="Optional label appended to output filename (e.g. 'bc' → timeline_phase_labeled_fixed28_bc_*.csv).")
     args = parser.parse_args()
     raise SystemExit(main(
         args.config,
@@ -184,4 +229,5 @@ if __name__ == "__main__":
         consensus_file=args.consensus_file,
         fixed_period=args.fixed_period,
         timeline_file=args.timeline_file,
+        tag=args.tag,
     ))
