@@ -14,6 +14,7 @@ from src.config import (
     DEFAULT_PERIOD_MAX,
     AVG_DAYS_PER_MONTH,
 )
+from src.constants import PHASE_ORDER
 
 
 
@@ -1532,7 +1533,7 @@ def calculate_phase_statistics(
         user_df = df[df[user_col] == user]
         
         # Create rows for ALL 4 phases for this user
-        for phase in ["Menstrual", "Follicular", "Ovulation", "Luteal"]:
+        for phase in PHASE_ORDER:
             if phase not in user_phase_lengths[user_str]:
                 continue
             
@@ -1592,7 +1593,7 @@ def calculate_phase_statistics(
     
     # Aggregate by phase
     phase_stats = []
-    for phase in ["Menstrual", "Follicular", "Ovulation", "Luteal"]:
+    for phase in PHASE_ORDER:
         phase_df = zscore_df[zscore_df["phase"] == phase]
         
         if len(phase_df) == 0:
