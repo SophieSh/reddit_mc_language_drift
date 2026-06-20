@@ -1,37 +1,135 @@
 """Utility functions for file I/O and data loading."""
-import pandas as pd
+import logging
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
+
 from src.io import find_latest_file, parse_jsonl_file
+
+log = logging.getLogger(__name__)
+
+
+def compute_family_pca(df: pd.DataFrame, families_path: Path, per_user_normalize: bool = True) -> tuple[pd.DataFrame, list[str]]:
+    """Reduce features to one PC1 per attribute family (MATLAB-matching implementation).
+
+    Matches runner_compute_frequencies_grouped.m (supervisor version):
+      0. Per-user z-score every feature column (omitnan mean/std per user) — removes
+         between-user variance so PCA captures within-user cycle structure
+      Then for each family:
+      1. Build pairwise Pearson correlation matrix (NaN-safe per pair)
+      2. Drop columns with <80% finite off-diagonal correlations
+      3. Eigendecompose correlation matrix; last eigenvector = PC1 (largest eigenvalue)
+      4. Fix PC1 sign so sum of loadings is positive
+      5. Z-score each feature independently (NaN-safe)
+      6. Project z-scored data onto PC1 → family composite score (NaN propagates)
+
+    Args:
+        per_user_normalize: if True (default), apply per-user z-scoring before PCA,
+                            matching the supervisor's MATLAB script.
+
+    Returns (df_with_family_cols, list_of_family_col_names).
+    """
+    families = pd.read_excel(families_path)
+    families["Attribute"] = families["Attribute"] + "_mean"
+
+    df = df.copy()
+
+    # Step 0: per-user z-score all feature columns (MATLAB lines 8-21)
+    if per_user_normalize and "author" in df.columns:
+        feat_cols = [c for c in families["Attribute"].tolist() if c in df.columns]
+        for col in feat_cols:
+            if df[col].var(skipna=True) > 0:
+                mu  = df.groupby("author")[col].transform(lambda v: v.mean())
+                sig = df.groupby("author")[col].transform(lambda v: v.std())
+                sig = sig.fillna(1.0).replace(0.0, 1.0)
+                df[col] = (df[col] - mu) / sig
+        log.info("  Per-user z-scoring applied to %d feature columns", len(feat_cols))
+
+    family_cols: list[str] = []
+
+    for family, grp in families.groupby("Family"):
+        attrs = [a for a in grp["Attribute"].tolist() if a in df.columns]
+        if len(attrs) < 2:
+            log.warning("Family %s: only %d feature(s) found in data, skipping", family, len(attrs))
+            continue
+
+        cur = df[attrs].values.astype(float)
+        n_var = cur.shape[1]
+
+        # Pairwise correlation matrix (NaN-safe, matching MATLAB corr() with 'type','Pearson')
+        c = np.eye(n_var)
+        for i1 in range(n_var):
+            for i2 in range(i1 + 1, n_var):
+                v1, v2 = cur[:, i1], cur[:, i2]
+                both = np.isfinite(v1) & np.isfinite(v2)
+                if both.sum() >= 2:
+                    r = np.corrcoef(v1[both], v2[both])[0, 1]
+                    c[i1, i2] = c[i2, i1] = r if np.isfinite(r) else 0.0
+                else:
+                    c[i1, i2] = c[i2, i1] = 0.0
+
+        keep = np.sum(np.isfinite(c), axis=0) >= 0.8 * n_var
+        attrs_k = [a for a, k in zip(attrs, keep) if k]
+        c_k = c[np.ix_(keep, keep)]
+
+        if len(attrs_k) < 2:
+            log.warning("Family %s: fewer than 2 features survive keep_vars filter, skipping", family)
+            continue
+
+        eigenvalues, eigenvectors = np.linalg.eigh(c_k)
+        pc1 = eigenvectors[:, -1]
+        var_explained = eigenvalues[-1] / eigenvalues.sum() * 100
+
+        if pc1.sum() < 0:
+            pc1 = -pc1
+
+        log.info("  Family %-15s: %2d features, PC1 = %.1f%% variance", family, len(attrs_k), var_explained)
+
+        cur_k = df[attrs_k].values.astype(float)
+        zdata = np.full_like(cur_k, np.nan)
+        for i1 in range(cur_k.shape[1]):
+            v = cur_k[:, i1]
+            fin = np.isfinite(v)
+            if fin.sum() > 1:
+                mu, sd = v[fin].mean(), v[fin].std(ddof=1)
+                zdata[fin, i1] = (v[fin] - mu) / sd if sd > 0 else 0.0
+
+        col = f"family_{family.lower().replace(' ', '_')}"
+        df[col] = zdata @ pc1
+        family_cols.append(col)
+
+    log.info("Family PCA: %d composites created: %s", len(family_cols), family_cols)
+    return df, family_cols
 
 
 def identify_feature_columns(df: pd.DataFrame, cfg: dict) -> list[str]:
     """Identify feature columns (exclude metadata columns and non-numeric columns).
-    
+
     Args:
         df: DataFrame with posts and features
         cfg: Configuration dictionary
-        
+
     Returns:
         List of numeric feature column names
     """
     metadata_cols = set(cfg.get("reddit_metadata_columns", []))
-    
+
     # Also exclude common non-feature columns that might not be in metadata list
     additional_exclude = {
         'offset_from_cd1', 'ts_utc', 'ts_date', 'id', 'source', 'source_cut',
         'created_utc', 'permalink', 'author'
     }
-    
+
     all_cols = set(df.columns)
     # Filter: exclude metadata columns, additional exclude columns, and non-numeric columns
     feature_cols = [
-        col for col in all_cols 
-        if col not in metadata_cols 
+        col for col in all_cols
+        if col not in metadata_cols
         and col not in additional_exclude
         and pd.api.types.is_numeric_dtype(df[col])
     ]
-    
+
     return feature_cols
 
 
