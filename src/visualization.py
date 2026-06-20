@@ -10,6 +10,7 @@ import pandas as pd
 from scipy.optimize import curve_fit
 
 from src.analysis import aggregate_by_day
+from src.constants import PHASE_ORDER
 
 
 def create_adaptive_phases(cycle_length: float, split_luteal: bool = False) -> dict[str, tuple[int, int]]:
@@ -562,7 +563,7 @@ def aggregate_features_by_phase(
         time_col: 'count'
     }).reset_index()
     phase_summary.columns = ['phase', 'n_users', 'n_user_days']
-    phase_order = ['Menstrual', 'Follicular', 'Ovulation', 'Luteal']
+    phase_order = PHASE_ORDER
     for phase in phase_order:
         phase_row = phase_summary[phase_summary['phase'] == phase]
         if len(phase_row) > 0:
@@ -644,7 +645,7 @@ def aggregate_features_by_phase(
         'n_users': 'first',  # n_users should be same for all features per phase
         'n_user_days': 'first'  # n_user_days should be same for all features per phase
     }).reset_index()
-    phase_order = ['Menstrual', 'Follicular', 'Ovulation', 'Luteal']
+    phase_order = PHASE_ORDER
     for phase in phase_order:
         phase_row = phase_final[phase_final['phase'] == phase]
         if len(phase_row) > 0:
@@ -679,7 +680,7 @@ def plot_phase_analysis(
         print(f"  ⚠ No phase data to visualize")
         return
     
-    phase_order = ['Menstrual', 'Follicular', 'Ovulation', 'Luteal']
+    phase_order = PHASE_ORDER
     phase_colors = {
         'Menstrual': '#d62728',
         'Follicular': '#ff7f0e',
