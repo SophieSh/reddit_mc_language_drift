@@ -111,18 +111,13 @@ def main(
     # Filter to posts with valid offsets
     timeline_df = timeline_df[timeline_df['offset_from_cd1'].notna()].copy()
     
-    # Step 5: Time window filtering (applied by default to match old working version)
-    print(f"\n[Step 5.5] Filtering to ±{window_months} months around anchor...")
+    # Step 5: Time window filtering around CD1 (not anchor post timestamp)
+    print(f"\n[Step 5.5] Filtering to ±{window_months} months around CD1...")
     from src.config import AVG_DAYS_PER_MONTH
-    from src.preprocess import filter_posts_by_anchor_window
 
+    max_days = int(window_months * AVG_DAYS_PER_MONTH)
     before = len(timeline_df)
-    timeline_df = filter_posts_by_anchor_window(
-        timeline_df,
-        users_df,
-        window_months=window_months,
-        user_col='author'
-    )
+    timeline_df = timeline_df[timeline_df["offset_from_cd1"].abs() <= max_days].copy()
     after = len(timeline_df)
     print(f"   Filtered to {after:,} posts (from {before:,})")
     
@@ -170,15 +165,12 @@ def main(
             timeline_no_anchors_df['offset_from_cd1'].notna()
         ].copy()
         
-        # Apply the same time window filtering
-        print(f"  Filtering to ±{window_months} months around anchor (no anchors)...")
+        # Apply the same time window filtering around CD1
+        print(f"  Filtering to ±{window_months} months around CD1 (no anchors)...")
         before_no = len(timeline_no_anchors_df)
-        timeline_no_anchors_df = filter_posts_by_anchor_window(
-            timeline_no_anchors_df,
-            users_df,
-            window_months=window_months,
-            user_col='author'
-        )
+        timeline_no_anchors_df = timeline_no_anchors_df[
+            timeline_no_anchors_df["offset_from_cd1"].abs() <= max_days
+        ].copy()
         after_no = len(timeline_no_anchors_df)
         print(f"   Filtered to {after_no:,} posts (from {before_no:,})")
         
