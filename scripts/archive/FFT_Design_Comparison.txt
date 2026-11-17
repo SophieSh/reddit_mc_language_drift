@@ -1,0 +1,146 @@
+Pipeline Design Comparison: 35_nufft_spectrum_analysis.py vs 35_nufft_matlab_match.py
+  
+  #: 1
+  Step: Temporal window
+  35_nufft_spectrum_analysis: No filter — all rows used
+  35_nufft_matlab_match: |offset_from_cd1| <= 90 always
+  Better choice: matlab_match
+  Bias risk if wrong: Analysis leaks cross-cycle phase drift into the DFT; dilutes the 28d peak
+  ────────────────────────────────────────
+  #: 2
+  Step: Min observations
+  35_nufft_spectrum_analysis: _MIN_OBS = 10
+  35_nufft_matlab_match: _MIN_OBS = 4
+  Better choice: analysis
+  Bias risk if wrong: 4 points in a 100-frequency NUFFT is underdetermined; those spectra are pure
+    window-function noise
+  ────────────────────────────────────────
+  #: 3
+  Step: Time-series detrend
+  35_nufft_spectrum_analysis: Mean-subtract only
+  35_nufft_matlab_match: Mean-subtract + linear detrend
+  Better choice: matlab_match
+  Bias risk if wrong: Without linear detrend, slow drifts leak into 20–40d band and inflate peak height
+  ────────────────────────────────────────
+  #: 4
+  Step: TS amplitude normalisation
+  35_nufft_spectrum_analysis: No z-score by default
+  35_nufft_matlab_match: Mandatory z-score (ddof=1)
+  Better choice: analysis (no z-score)
+  Bias risk if wrong: Z-scoring erases per-user amplitude; if cycling modulates variance, that signal is
+
+    destroyed
+  ────────────────────────────────────────
+  #: 5
+  Step: Spectral output type
+  35_nufft_spectrum_analysis: Power |F|²/N + log1p
+  35_nufft_matlab_match: Amplitude |F|/N, no compression
+  Better choice: analysis
+  Bias risk if wrong: Raw amplitude dominated by high-posting users; SVD absorbs posting-volume confound
+  ────────────────────────────────────────
+  #: 6
+  Step: Red-noise spectral detrend
+  35_nufft_spectrum_analysis: I − H log-T projection (on by default)
+  35_nufft_matlab_match: None
+  Better choice: analysis ⚠️  critical
+  Bias risk if wrong: 1/f slope pushes SVD first component toward 40d boundary regardless of any real
+    cycle; biggest bias mechanism in the pipeline
+  ────────────────────────────────────────
+  #: 7
+  Step: NUFFT frequency convention
+  35_nufft_spectrum_analysis: Direct freq = 1/period (cycles/day) — unambiguous
+  35_nufft_matlab_match: w_grid passed as cycles/day with 2π compensating rescale to match MATLAB
+  Better choice: analysis (simpler)
+  Bias risk if wrong: If rescale chain is off by any factor, every reported period is at the wrong
+    absolute value
+  ────────────────────────────────────────
+  #: 8
+  Step: Row normalisation before SVD
+  35_nufft_spectrum_analysis: Off by default
+  35_nufft_matlab_match: Always row-center + row-z-score (ddof=1)
+  Better choice: matlab_match
+  Bias risk if wrong: Without equal scaling, SVD first component reflects amplitude ranking, not cycling
+
+    strength
+  ────────────────────────────────────────
+  #: 9
+  Step: SVD sign convention
+  35_nufft_spectrum_analysis: Sign-flip Vt[0,:] if sum(U[:,0]) < 0 then use signed
+  35_nufft_matlab_match: abs(Vt[0,:]) always
+  Better choice: analysis
+  Bias risk if wrong: abs() prevents cancellation but discards orientation; sign-flip is more principled
+
+    for cross-user averaging
+  ────────────────────────────────────────
+  #: 10
+  Step: Variable importance
+  35_nufft_spectrum_analysis: Raw projection onto Vt[0,:] — conflates amplitude with alignment
+  35_nufft_matlab_match: abs(U[:,0]) after equal row scaling
+  Better choice: matlab_match
+  Bias risk if wrong: Raw projection promotes high-variance non-cycling variables; confounds amplitude
+    with alignment
+  ────────────────────────────────────────
+  #: 11
+  Step: Top-user threshold
+  35_nufft_spectrum_analysis: >= quantile(1 − top_frac)
+  35_nufft_matlab_match: > percentile(50) strict
+  Better choice: Negligible at N~1600
+  Bias risk if wrong: —
+  ────────────────────────────────────────
+  #: 12
+  Step: Final spectrum aggregation
+  35_nufft_spectrum_analysis: Unweighted mean, or S[0]-weighted via --weighted-mean
+  35_nufft_matlab_match: Unweighted mean always
+  Better choice: analysis (--weighted-mean)
+  Bias risk if wrong: Unweighted mean treats a noisy barely-cycling user equally with a clean 28d user
+  ────────────────────────────────────────
+  #: 13
+  Step: Peak estimation
+  35_nufft_spectrum_analysis: Parabolic interpolation around argmax
+  35_nufft_matlab_match: Argmax grid point only
+  Better choice: analysis
+  Bias risk if wrong: Argmax has up to 0.1d quantisation error; artificially "round" reported periods
+  ────────────────────────────────────────
+  #: 14
+  Step: Null/surrogate test
+  35_nufft_spectrum_analysis: Day-shuffle surrogate (off by default)
+  35_nufft_matlab_match: Not implemented
+  Better choice: analysis
+  Bias risk if wrong: Without a null test, reported cycling scores cannot be interpreted as
+  statistically
+    significant
+
+  ---
+  Critical flags (ordered by severity)
+  
+  Flag 1 — Red-noise detrend (row 6) is the dominant confound. The 1/f slope in linguistic spectra is
+  not subtle — it is the largest structure in any broadband NUFFT spectrum. Without the I − H log-T
+  projection, the SVD first component captures the shared red-noise gradient across all variables, and
+  Vt[0,:] is monotonically increasing from 20d to 40d. The matlab_match pipeline will report a
+  biologically plausible "peak" near 38–40d entirely driven by spectral colour, not by any cycle. Every
+  result from the matlab_match script without spectral detrend should be treated as confounded.
+
+  Flag 2 — MIN_OBS = 4 (row 2) inflates reported user coverage. Including spectra computed from 4
+  irregular observations adds pure window-function noise to every SVD matrix and misrepresents the user
+  count as "coverage" when much of it is uninformative.
+
+  Flag 3 — NUFFT rescale chain (row 7) requires numerical validation. The 2π compensating factor in
+  _nufft_mag is correct as documented, but the analysis script's transparent freq = 1/period convention
+  has zero risk of a silent period-axis error.
+
+  ---
+  Bottom line
+
+
+  Flag 3 — NUFFT rescale chain (row 7) requires numerical validation. The 2π compensating factor in
+  _nufft_mag is correct as documented, but the analysis script's transparent freq = 1/period convention
+  has zero risk of a silent period-axis error.
+
+  ---
+  Bottom line
+
+  The two scripts make opposite tradeoffs. The matlab_match script is correct about the observation
+  window, row normalisation, and variable importance. The analysis script is correct about minimum
+  observations, spectral compression (log1p + power), red-noise detrend, sign convention, weighted
+  aggregation, and peak interpolation. Neither is strictly better end-to-end — the ideal pipeline
+  borrows from both.

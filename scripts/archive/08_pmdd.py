@@ -41,7 +41,7 @@ def main(
     """
     cfg = load_config(config_path)
     
-    project_dir = Path(__file__).parent.parent
+    project_dir = Path(__file__).resolve().parents[2]
     data_dir = project_dir / "data"
     raw_dir = Path(cfg["paths"]["raw"])
     interim_dir = Path(cfg["paths"]["interim"])

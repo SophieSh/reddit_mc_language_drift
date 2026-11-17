@@ -38,7 +38,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from src.io import find_latest_file, save_with_timestamp
 
 _MIN_OBS = 10
@@ -764,7 +764,7 @@ if __name__ == "__main__":
                         help="Use 10 domain-expert cluster representatives instead of SVD importance selection")
 
     args = parser.parse_args()
-    project_root = Path(__file__).resolve().parent.parent
+    project_root = Path(__file__).resolve().parents[2]
     interim_dir = project_root / "data" / "interim"
     output_dir = (args.output_dir if args.output_dir.is_absolute()
                   else project_root / args.output_dir)

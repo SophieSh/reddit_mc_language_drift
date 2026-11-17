@@ -44,7 +44,7 @@ import pandas as pd
 from sklearn.metrics import roc_auc_score, average_precision_score
 from sklearn.utils.class_weight import compute_sample_weight
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from src.ebm_utils import (

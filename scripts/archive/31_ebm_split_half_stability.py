@@ -40,7 +40,7 @@ from scipy.stats import hypergeom
 from sklearn.metrics import roc_auc_score
 from sklearn.preprocessing import LabelEncoder
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 # ── Import reusable functions from script 27 ──────────────────────────────────

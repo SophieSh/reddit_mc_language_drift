@@ -1008,7 +1008,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Resolve directories relative to this script's project root
-    project_root = Path(__file__).resolve().parent.parent
+    project_root = Path(__file__).resolve().parents[2]
     interim_dir = project_root / "data" / "interim"
     output_dir = (
         args.output_dir if args.output_dir.is_absolute()
