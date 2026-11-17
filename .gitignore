@@ -27,8 +27,14 @@ data/
 models/
 reports/
 
+# Script outputs
+outputs/
+
 # Old/exploratory code
 code_first_attemps/
 data/
 reports/
 analysis/
+voice_cycle/twitch/credentials.json
+voice_cycle/twitch/thumbs/
+voice_cycle/twitch/roster.json

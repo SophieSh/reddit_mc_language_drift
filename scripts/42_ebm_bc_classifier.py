@@ -41,7 +41,7 @@ import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score, average_precision_score
 from sklearn.utils.class_weight import compute_sample_weight
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -54,6 +54,7 @@ from src.ebm_utils import (
     shape_functions,
     signed_importance,
 )
+from src.utils import compute_family_pca
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -104,6 +105,32 @@ def select_features_mannwhitney(
     selected_names = [feature_names[i] for i in top_idx]
     logging.info(
         f"  Feature pre-selection (mannwhitney): {len(top_idx)} / {len(scores)} features kept.\n"
+        f"  Top 10: {selected_names[:10]}"
+    )
+    return X[:, top_idx], selected_names
+
+
+def select_features_anova(
+    X: np.ndarray,
+    y: np.ndarray,
+    feature_names: list[str],
+    n: int,
+) -> tuple[np.ndarray, list[str]]:
+    """Return (X_subset, names_subset): top-n features by ANOVA F-statistic."""
+    from sklearn.feature_selection import f_classif
+
+    X_fill = X.copy()
+    for j in range(X.shape[1]):
+        med = np.nanmedian(X_fill[:, j])
+        X_fill[np.isnan(X_fill[:, j]), j] = med
+
+    F, _ = f_classif(X_fill, y)
+    F = np.nan_to_num(F, nan=0.0)
+
+    top_idx = np.argsort(F)[::-1][:n]
+    selected_names = [feature_names[i] for i in top_idx]
+    logging.info(
+        f"  Feature pre-selection (anova F-test): {len(top_idx)} / {X.shape[1]} features kept.\n"
         f"  Top 10: {selected_names[:10]}"
     )
     return X[:, top_idx], selected_names
@@ -224,7 +251,10 @@ def parse_args():
                    ))
     p.add_argument("--top-n",   type=int, default=15)
     p.add_argument("--feature-select-n", type=int, default=None,
-                   help="Pre-select top N features before CV (Mann-Whitney U test).")
+                   help="Pre-select top N features before CV.")
+    p.add_argument("--feature-select-method", default="mannwhitney",
+                   choices=["mannwhitney", "anova"],
+                   help="Feature pre-selection statistic (default: mannwhitney).")
     p.add_argument("--learning-rate",     type=float, default=0.01)
     p.add_argument("--max-rounds",        type=int,   default=5000)
     p.add_argument("--max-bins",          type=int,   default=256)
@@ -243,6 +273,9 @@ def parse_args():
                    help="Number of label permutations (default: 100).")
     p.add_argument("--perm-n-folds", type=int, default=3,
                    help="Folds to use per permutation for speed (default: 3).")
+    p.add_argument("--family-pca", type=Path, default=None,
+                   help="Path to Attribute_families_cycles.xlsx; reduces 69 features to "
+                        "one PC1 per family before phase pivot (5 features × 4 phases = 20 total).")
     p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args()
 
@@ -331,9 +364,14 @@ def main():
     df.to_csv(combined_csv_path, index=False, encoding="utf-8-sig")
     logging.info(f"  Saved combined timeline data → {combined_csv_path.name}")
 
-    non_feature_cols = {"author", "offset_from_cd1", "phase", "bc"}
-    possible_features = [c for c in df.columns if c not in non_feature_cols and not c.startswith("Unnamed:")]
-    numeric_features = df[possible_features].select_dtypes(include=[np.number]).columns.tolist()
+    if args.family_pca:
+        logging.info("  Computing family PCA composites from %s ...", args.family_pca.name)
+        df, family_cols = compute_family_pca(df, args.family_pca)
+        numeric_features = family_cols
+    else:
+        non_feature_cols = {"author", "offset_from_cd1", "phase", "bc"}
+        possible_features = [c for c in df.columns if c not in non_feature_cols and not c.startswith("Unnamed:")]
+        numeric_features = df[possible_features].select_dtypes(include=[np.number]).columns.tolist()
     if not numeric_features:
         raise ValueError("No numeric linguistic features found in the input datasets.")
 
@@ -369,7 +407,10 @@ def main():
     groups = df_users["author"].values
 
     if args.feature_select_n and args.feature_select_n < len(feature_names):
-        X, feature_names = select_features_mannwhitney(X, y, feature_names, args.feature_select_n)
+        if args.feature_select_method == "anova":
+            X, feature_names = select_features_anova(X, y, feature_names, args.feature_select_n)
+        else:
+            X, feature_names = select_features_mannwhitney(X, y, feature_names, args.feature_select_n)
 
     n_bc, n_non = (y == 1).sum(), (y == 0).sum()
     nan_frac_bc  = np.isnan(X[y==1]).mean()
@@ -402,7 +443,10 @@ def main():
             _, y_proba, fold_aucs = cv_result
 
         auc = roc_auc_score(y, y_proba[:, 1])
-        logging.info(f"  OOF AUC={auc:.4f}")
+        ap = average_precision_score(y, y_proba[:, 1])
+        base_rate = float(np.mean(y))
+        logging.info(f"  OOF AUC={auc:.4f}  |  PR-AUC(AP)={ap:.4f}  "
+                     f"(base rate={base_rate:.4f}, lift={ap/base_rate:.2f}x)")
 
         n_folds_all = args.n_folds
         all_stable = {i for i, cnt in fold_counts.items() if cnt == n_folds_all}

@@ -10,23 +10,29 @@ from src.io import find_latest_file, parse_jsonl_file
 log = logging.getLogger(__name__)
 
 
-def compute_family_pca(df: pd.DataFrame, families_path: Path, per_user_normalize: bool = True) -> tuple[pd.DataFrame, list[str]]:
-    """Reduce features to one PC1 per attribute family (MATLAB-matching implementation).
+def compute_family_pca(df: pd.DataFrame, families_path: Path, per_user_normalize: bool = False, sign_fix: bool = False) -> tuple[pd.DataFrame, list[str]]:
+    """Reduce features to one PC1 per attribute family.
 
-    Matches runner_compute_frequencies_grouped.m (supervisor version):
-      0. Per-user z-score every feature column (omitnan mean/std per user) — removes
-         between-user variance so PCA captures within-user cycle structure
-      Then for each family:
-      1. Build pairwise Pearson correlation matrix (NaN-safe per pair)
-      2. Drop columns with <80% finite off-diagonal correlations
-      3. Eigendecompose correlation matrix; last eigenvector = PC1 (largest eigenvalue)
-      4. Fix PC1 sign so sum of loadings is positive
-      5. Z-score each feature independently (NaN-safe)
-      6. Project z-scored data onto PC1 → family composite score (NaN propagates)
+    Faithful port of runner_compute_frequencies_grouped.m (supervisor version),
+    lines 10-44. For each family:
+      1. Build pairwise Pearson correlation matrix on the raw feature columns.
+         A pair that cannot be computed (constant vector, or <2 shared finite
+         points) is stored as NaN — exactly like MATLAB corr() — so the
+         keep_vars filter below behaves like MATLAB's isfinite() check.
+      2. keep_vars: keep a feature only if >=80% of its correlation-matrix
+         column is finite (drops constant / un-correlatable features).
+      3. Eigendecompose the kept correlation submatrix; the last eigenvector is
+         PC1 (largest eigenvalue), matching MATLAB eig() ascending order + v(:,end).
+      4. Column-wise z-score each kept feature (NaN-safe, ddof=1 like MATLAB
+         zscore), leaving NaNs in place.
+      5. Project onto PC1 -> family composite score (NaN propagates per row).
 
-    Args:
-        per_user_normalize: if True (default), apply per-user z-scoring before PCA,
-                            matching the supervisor's MATLAB script.
+    The MATLAB reference does NOT per-user normalize and does NOT sign-fix PC1.
+    Leave both flags False to match MATLAB (e.g. for the spectral/NUFFT scripts).
+    `per_user_normalize` z-scores each feature within user before the PCA, so PC1
+    aligns to within-user (cyclic) structure rather than between-user baselines.
+    `sign_fix` flips PC1 so its loadings sum positive, giving a deterministic curve
+    orientation across runs. Both are useful for the pooled GAM (script 47).
 
     Returns (df_with_family_cols, list_of_family_col_names).
     """
@@ -35,7 +41,7 @@ def compute_family_pca(df: pd.DataFrame, families_path: Path, per_user_normalize
 
     df = df.copy()
 
-    # Step 0: per-user z-score all feature columns (MATLAB lines 8-21)
+    # Optional (non-MATLAB) extension: per-user z-score before PCA.
     if per_user_normalize and "author" in df.columns:
         feat_cols = [c for c in families["Attribute"].tolist() if c in df.columns]
         for col in feat_cols:
@@ -57,17 +63,19 @@ def compute_family_pca(df: pd.DataFrame, families_path: Path, per_user_normalize
         cur = df[attrs].values.astype(float)
         n_var = cur.shape[1]
 
-        # Pairwise correlation matrix (NaN-safe, matching MATLAB corr() with 'type','Pearson')
+        # Pairwise correlation matrix, matching MATLAB corr() with 'type','Pearson'.
+        # Non-computable pairs (constant vector or <2 shared finite points) stay
+        # NaN so the keep_vars filter below behaves like MATLAB's isfinite() check.
         c = np.eye(n_var)
         for i1 in range(n_var):
             for i2 in range(i1 + 1, n_var):
                 v1, v2 = cur[:, i1], cur[:, i2]
                 both = np.isfinite(v1) & np.isfinite(v2)
                 if both.sum() >= 2:
-                    r = np.corrcoef(v1[both], v2[both])[0, 1]
-                    c[i1, i2] = c[i2, i1] = r if np.isfinite(r) else 0.0
+                    r = np.corrcoef(v1[both], v2[both])[0, 1]  # NaN if a vector is constant
                 else:
-                    c[i1, i2] = c[i2, i1] = 0.0
+                    r = np.nan
+                c[i1, i2] = c[i2, i1] = r
 
         keep = np.sum(np.isfinite(c), axis=0) >= 0.8 * n_var
         attrs_k = [a for a, k in zip(attrs, keep) if k]
@@ -77,11 +85,15 @@ def compute_family_pca(df: pd.DataFrame, families_path: Path, per_user_normalize
             log.warning("Family %s: fewer than 2 features survive keep_vars filter, skipping", family)
             continue
 
+        # eig of the kept correlation submatrix; eigh returns ascending eigenvalues,
+        # so the last column is PC1 (largest eigenvalue) — matches MATLAB v(:,end).
         eigenvalues, eigenvectors = np.linalg.eigh(c_k)
         pc1 = eigenvectors[:, -1]
         var_explained = eigenvalues[-1] / eigenvalues.sum() * 100
 
-        if pc1.sum() < 0:
+        # MATLAB uses the raw eigenvector sign; sign_fix gives a deterministic
+        # orientation (loadings sum positive) for the GAM curves.
+        if sign_fix and pc1.sum() < 0:
             pc1 = -pc1
 
         log.info("  Family %-15s: %2d features, PC1 = %.1f%% variance", family, len(attrs_k), var_explained)
