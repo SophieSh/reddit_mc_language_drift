@@ -49,6 +49,8 @@ KEEP_PATTERNS = [
     "data/interim/non_bc_timeline_20260603T000200_yngvefix_*",
     # --- Appendix E frequency cohort (07c default input)
     "data/interim/eligible_users_timeline_minposts20_span100_no_anchors_20260517T134609.csv",
+    # --- initial cohort DB (15,165 users) used by demographics/extract_top_subreddits.py
+    "data/submission/processed/users_database_CD_20260329T064620.csv",
     # --- processed: GPT-5 labels (not reproducible without the API run)
     "data/processed/bc_wide_candidates_with_labels.csv",
     "data/processed/user_age_distribution_notitle.png",
@@ -128,10 +130,13 @@ def plan(strict: bool = False) -> tuple[list[Path], list[Path]]:
                     ok = f is newest or is_kept(rel)
                 (keep if ok else move).append(f)
 
-    # data/submission: move everything
+    # data/submission: move everything except KEEP_PATTERNS
     sub = ROOT / "data/submission"
     if sub.exists():
-        move.append(sub)
+        for f in sub.rglob("*"):
+            if f.is_file():
+                rel = str(f.relative_to(ROOT))
+                (keep if is_kept(rel) else move).append(f)
 
     # reports: keep list only (top level, plus inside reports/ebm/bc)
     rep = ROOT / "reports"

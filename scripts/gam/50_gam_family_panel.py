@@ -8,14 +8,13 @@ family to the hypothesised hormonal direction).
 
 No titles on either figure (paper style). Family name sits as the panel y-label.
 
-Canonical input (reproduces the clean script-47 curves):
-  data/interim/eligible_users_two_cycles_span28_gap7_no_anchors_w28_20260608T202125.csv
-passed as BOTH --phase-labeled and --eligible, with --family-pca and --window 28.
+Canonical input (paper Figure 2; Yngve-corrected features):
+  data/interim/eligible_users_two_cycles_span28_gap7_no_anchors_w28_20260608T202125_yngvefix_20260906T140542.csv
+(711 users, 14,834 user-days). The uncorrected file without "_yngvefix" gives
+slightly different curves and does NOT match the paper.
 
-Usage:
-  python scripts/50_gam_family_panel.py \
-    --input data/interim/eligible_users_two_cycles_span28_gap7_no_anchors_w28_20260608T202125.csv \
-    --family-pca data/raw/Attribute_families_cycles.xlsx
+Usage (no arguments reproduces the paper Figure 2 byte-for-byte):
+  python scripts/gam/50_gam_family_panel.py
 """
 from __future__ import annotations
 
@@ -42,7 +41,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(me
 log = logging.getLogger(__name__)
 
 CANONICAL = ("data/interim/"
-             "eligible_users_two_cycles_span28_gap7_no_anchors_w28_20260608T202125.csv")
+             "eligible_users_two_cycles_span28_gap7_no_anchors_w28_20260608T202125"
+             "_yngvefix_20260906T140542.csv")
 
 # Panel order requested for the paper.
 FAMILY_ORDER = [
@@ -148,7 +148,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", type=Path, default=ROOT / CANONICAL)
     ap.add_argument("--family-pca", type=Path, default=ROOT / "data/raw/Attribute_families_cycles.xlsx")
-    ap.add_argument("--output-dir", type=Path, default=ROOT / "reports" / "gam_cycle_curves")
+    ap.add_argument("--output-dir", type=Path, default=ROOT / "reports" / "gam_cycle_curves_yngvefix")
     ap.add_argument("--window", type=int, default=28)
     ap.add_argument("--period", type=int, default=28)
     ap.add_argument("--n-splines", type=int, default=10)

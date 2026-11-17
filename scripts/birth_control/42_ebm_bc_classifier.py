@@ -23,11 +23,15 @@ Design
   • sample_weight="balanced" — corrects class imbalance
   • Pure additive EBM (interactions=0)
 
-Usage
-  python scripts/42_ebm_bc_classifier.py \
-    --regular-users-file data/interim/regular_timeline.csv \
-    --bc-users-file data/interim/bc_timeline.csv \
-    --output-run-name run_v1
+Usage — paper result (Section 3.4: AUC 0.640, 482 BC / 3,842 non-BC)
+  python scripts/birth_control/42_ebm_bc_classifier.py \
+    --regular-users-file data/interim/non_bc_timeline_20260603T000200_yngvefix_20260906T140542.csv \
+    --bc-users-file data/interim/bc_timeline_20260603T000200_yngvefix_20260906T140542.csv \
+    --output-run-name yngvefix_baseline_w91 \
+    --feature-strategy all_four_phases_present \
+    --feature-select-n 50 --feature-select-method mannwhitney \
+    --window-days 91
+  Use the "_yngvefix" files (corrected Yngve feature). The uncorrected files give AUC 0.645.
 """
 
 import argparse

@@ -1,10 +1,13 @@
 """Replot the EBM (BC classifier) shape functions, GROUPED BY LINGUISTIC FAMILY.
 
-Re-fits the committed symmetric ±91 baseline (AUC 0.645) exactly:
-  BC   = data/interim/bc_timeline_20260603T000200.csv
-  nonBC= data/interim/non_bc_timeline_20260603T000200.csv
+Re-fits the paper's symmetric ±91 baseline (AUC 0.640, Figure 4) exactly:
+  BC   = data/interim/bc_timeline_20260603T000200_yngvefix_20260906T140542.csv
+  nonBC= data/interim/non_bc_timeline_20260603T000200_yngvefix_20260906T140542.csv
+  (Yngve-corrected features; the uncorrected files give AUC 0.645)
   window ±91, phase-means, all-four-phases-present, top-50 Mann-Whitney pre-select,
-  additive EBM (interactions=0), balanced class weights.
+  additive EBM (interactions=0), balanced class weights, top 25% features shown.
+
+Running with no arguments reproduces the paper Figure 4 byte-for-byte.
 
 Only the original run's PNG was saved (no model), so we re-fit to recover the shapes.
 
@@ -33,8 +36,8 @@ sys.path.insert(0, str(ROOT))
 
 from src.ebm_utils import make_ebm, shape_functions, signed_importance, clean_name
 
-BC_FILE = "data/interim/bc_timeline_20260603T000200.csv"
-NONBC_FILE = "data/interim/non_bc_timeline_20260603T000200.csv"
+BC_FILE = "data/interim/bc_timeline_20260603T000200_yngvefix_20260906T140542.csv"
+NONBC_FILE = "data/interim/non_bc_timeline_20260603T000200_yngvefix_20260906T140542.csv"
 FAMILY_XLSX = "data/raw/Attribute_families_cycles.xlsx"
 PHASES = ["Menstrual", "Follicular", "Ovulation", "Luteal"]
 FAMILY_ORDER = ["Affective", "Lexical access", "Syntactic", "General", "Pragmatic"]
@@ -158,8 +161,9 @@ def draw_shape(ax, d, title):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--top-frac", type=float, default=None,
-                    help="keep the top fraction by |signed importance| (e.g. 0.25 = top quartile)")
+    ap.add_argument("--top-frac", type=float, default=0.25,
+                    help="keep the top fraction by |signed importance| (default 0.25 = paper Figure 4; "
+                         "set to 0 to use --min-importance / mean importance instead)")
     ap.add_argument("--min-importance", type=float, default=None,
                     help="keep features with |signed importance| >= this; default = mean importance")
     ap.add_argument("--fselect", type=int, default=50, help="top-N Mann-Whitney pre-select (matches baseline)")
@@ -173,7 +177,7 @@ def main():
     ap.add_argument("--cv", action="store_true", help="also report 5-fold GroupKFold AUC")
     ap.add_argument("--bc-file", default=None, help="override BC timeline path (rel to repo root)")
     ap.add_argument("--nonbc-file", default=None, help="override non-BC timeline path")
-    ap.add_argument("--out", default="reports/ebm/bc/shapes_by_family_baseline_w91.png")
+    ap.add_argument("--out", default="reports/ebm/bc/shapes_by_family_baseline_w91_yngvefix.png")
     args = ap.parse_args()
 
     attr2fam = dict(pd.read_excel(ROOT / FAMILY_XLSX).values)
@@ -219,7 +223,7 @@ def main():
     #   --top-frac F      -> keep the top F fraction (threshold = (1-F) quantile)
     #   --min-importance  -> explicit cutoff
     #   default           -> mean importance ("above-average features")
-    if args.top_frac is not None:
+    if args.top_frac:
         thr = float(fdf["abs_imp"].quantile(1 - args.top_frac))
         rule = f"top {args.top_frac:.0%}"
     elif args.min_importance is not None:
